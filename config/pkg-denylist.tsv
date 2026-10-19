@@ -1,0 +1,22 @@
+# 侵害パッケージの名前とバージョンの完全一致リストです。
+# 形式: パッケージ名<TAB>バージョン<TAB>出典・理由
+# 出典を確認できた項目だけを追加し、過去の項目は削除しません。
+
+# Shai-Hulud（2026-08-04、Aikido Security の報告）
+# https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack
+keyv	6.0.0	Shai-Hulud 2026-08-04
+flat-cache	6.1.24	Shai-Hulud 2026-08-04
+file-entry-cache	11.1.6	Shai-Hulud 2026-08-04
+cacheable-request	13.0.20	Shai-Hulud 2026-08-04
+cacheable	2.5.1	Shai-Hulud 2026-08-04
+@cacheable/memory	2.2.1	Shai-Hulud 2026-08-04
+cache-manager	7.2.10	Shai-Hulud 2026-08-04
+@cacheable/node-cache	3.1.2	Shai-Hulud 2026-08-04
+@cacheable/utils	2.5.1	Shai-Hulud 2026-08-04
+@cacheable/net	2.1.1	Shai-Hulud 2026-08-04
+ecto	5.0.1	Shai-Hulud 2026-08-04
+@deliveroo/reevent	1.0.1	Shai-Hulud 2026-08-04 二次感染
+@or-sdk/invitations	1.4.9	Shai-Hulud 2026-08-04 二次感染
+@picsart/ai-sdk	3.32.2	Shai-Hulud 2026-08-04 二次感染
+@qlik/embed-runtime	1.6.4	Shai-Hulud 2026-08-04 二次感染
+picasso.js	2.11.6	Shai-Hulud 2026-08-04 二次感染

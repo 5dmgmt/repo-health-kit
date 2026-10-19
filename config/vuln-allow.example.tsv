@@ -1,0 +1,3 @@
+# repo<TAB>advisory-or-package<TAB>YYYY-MM-DD<TAB>理由
+# 到達可能性を確認し、期限を決めて据え置く場合だけ設定ファイルと同じ場所の
+# vuln-allow.tsv に追記してください。初期状態では据え置き項目はありません。

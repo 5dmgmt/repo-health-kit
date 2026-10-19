@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.repo-health-kit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__PROGRAM_PATH__</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+<!--__SCHEDULE_ENTRIES__-->
+  </array>
+  <key>StandardOutPath</key>
+  <string>__LAUNCH_LOG_PATH__</string>
+  <key>StandardErrorPath</key>
+  <string>__LAUNCH_LOG_PATH__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
