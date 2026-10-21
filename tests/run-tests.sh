@@ -68,6 +68,7 @@ run_security() {
     RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=0 \
     RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
+    RH_NODE_CANDIDATES= \
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
@@ -98,6 +99,19 @@ make_fake_php() {
     printf '%s\n' 'esac'
   } > "$fake_bin/php"
   chmod +x "$fake_bin/php"
+}
+
+make_fake_node() {
+  local fake_bin="$1"
+  mkdir -p "$fake_bin"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  -p) printf "%s" "${FAKE_NODE_VERSION-}" ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$fake_bin/node"
+  chmod +x "$fake_bin/node"
 }
 
 make_fake_lsof() {
@@ -132,7 +146,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..42\n'
+printf '1..56\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -356,6 +370,71 @@ make_fake_lsof "$fake_bin"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.1.30
 assert_contains 'PHP 8.1 はサポート終了の WARN' "$case_dir/output.txt" 'WARN  PHP 8\.1\.30（.*fake-bin/php）はサポート終了'
 
+case_dir="$TEST_TMP/node-26-old"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=26.12.0
+assert_contains 'Node 26.12.0 は修正版 26.12.1 より古い WARN' "$case_dir/output.txt" 'WARN  Node 26\.12\.0（.*fake-bin/node）.*修正版 26\.12\.1'
+assert_contains 'Node 26.12.0 の WARN に CVE を含める' "$case_dir/output.txt" 'Node 26\.12\.0.*CVE-2026-105482'
+
+case_dir="$TEST_TMP/node-26-fixed"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=26.12.1
+assert_not_contains 'Node 26.12.1 は要対応に出さない' "$case_dir/output.txt" 'WARN  Node 26\.12\.1（.*fake-bin/node）'
+
+case_dir="$TEST_TMP/node-24-old"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=24.22.0
+assert_contains 'Node 24.22.0 は修正版 24.22.1 より古い WARN' "$case_dir/output.txt" 'WARN  Node 24\.22\.0（.*fake-bin/node）.*修正版 24\.22\.1'
+
+case_dir="$TEST_TMP/node-25-eol"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=25.9.0
+assert_contains 'Node 25 はサポート終了の WARN' "$case_dir/output.txt" 'WARN  Node 25\.9\.0（.*fake-bin/node）はサポート終了'
+
+case_dir="$TEST_TMP/node-20-eol"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=20.19.0
+assert_contains 'Node 20 は EOL 閾値によるサポート終了の WARN' "$case_dir/output.txt" 'WARN  Node 20\.19\.0（.*fake-bin/node）はサポート終了'
+
+case_dir="$TEST_TMP/node-cellar"
+fake_bin="$case_dir/fake-bin"
+cellar_bin="$case_dir/Cellar/node@24/24.22.0/bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$cellar_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$cellar_bin/node" FAKE_NODE_VERSION=24.22.0
+assert_contains 'Homebrew の Node は formula 名つきの直し方を出す' "$case_dir/output.txt" 'brew upgrade node@24（Homebrew に修正版が出しだい）'
+
+case_dir="$TEST_TMP/node-unknown"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=
+assert_contains '版を返さない Node は未検査の NOTES' "$case_dir/output.txt" 'node（.*fake-bin/node）— 版を判定できず未検査'
+
 case_dir="$TEST_TMP/tls-node"
 fake_bin="$case_dir/fake-bin"
 make_fake_brew "$fake_bin"
@@ -451,7 +530,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.2\.0 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.3\.0 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"

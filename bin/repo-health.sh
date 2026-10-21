@@ -786,42 +786,71 @@ PY
   [ -z "$brew_prefix" ] || security_detail "Homebrew: $brew_prefix"
 }
 
-check_php_security() {
-  local candidates seen bin real version series minimum reason eol_threshold eol_reason
-  local listening lsof_output suffix kind matched httpd_pid keg kegs
+check_minimum_versions() {
+  local component="$1" row_component candidates seen bin real version series major minimum reason
+  local eol_threshold eol_reason listening lsof_output suffix kind matched httpd_pid
+  local keg kegs policy_level brew_prefix nvm_dir remedy formula
   if [ ! -f "$SECURITY_MINIMUMS" ]; then
-    NOTES[${#NOTES[@]}]="PHP の最低版は同梱リスト不足のため未検査"
+    case "$component" in
+      php) NOTES[${#NOTES[@]}]="PHP の最低版は同梱リスト不足のため未検査" ;;
+      node) NOTES[${#NOTES[@]}]="node の最低版は同梱リスト不足のため未検査" ;;
+    esac
     return
   fi
-  candidates="$TMP_DIR/php-candidates.list"
-  seen="$TMP_DIR/php-seen.list"
-  kegs="$TMP_DIR/php-kegs.list"
+  candidates="$TMP_DIR/${component}-candidates.list"
+  seen="$TMP_DIR/${component}-seen.list"
+  kegs="$TMP_DIR/${component}-kegs.list"
   : > "$candidates"
   : > "$seen"
   : > "$kegs"
-  type -aP php 2>/dev/null >> "$candidates" || true
-  type -aP php-fpm 2>/dev/null >> "$candidates" || true
-  [ -x /opt/homebrew/sbin/php-fpm ] && printf '%s\n' /opt/homebrew/sbin/php-fpm >> "$candidates"
-  [ -x /usr/local/sbin/php-fpm ] && printf '%s\n' /usr/local/sbin/php-fpm >> "$candidates"
 
   listening="no"
-  if command -v lsof >/dev/null 2>&1; then
-    if lsof_output="$(run_timeout 20 lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null)"; then
-      if printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^php/ { found=1 } END { exit !found }'; then
-        listening="yes"
-      fi
-      # httpd は PHP を読み込んでいる（mod_php）ときだけ数える。PHP を使わない Apache で FAIL にしない
-      for httpd_pid in $(printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^httpd/ { print $2 }' | LC_ALL=C sort -u); do
-        if run_timeout 20 lsof -nP -p "$httpd_pid" 2>/dev/null | LC_ALL=C grep -qiE 'libphp|mod_php'; then
-          listening="yes"
+  case "$component" in
+    php)
+      type -aP php 2>/dev/null >> "$candidates" || true
+      type -aP php-fpm 2>/dev/null >> "$candidates" || true
+      [ -x /opt/homebrew/sbin/php-fpm ] && printf '%s\n' /opt/homebrew/sbin/php-fpm >> "$candidates"
+      [ -x /usr/local/sbin/php-fpm ] && printf '%s\n' /usr/local/sbin/php-fpm >> "$candidates"
+      if command -v lsof >/dev/null 2>&1; then
+        if lsof_output="$(run_timeout 20 lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null)"; then
+          if printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^php/ { found=1 } END { exit !found }'; then
+            listening="yes"
+          fi
+          # httpd は PHP を読み込んでいる（mod_php）ときだけ数える。PHP を使わない Apache で FAIL にしない
+          for httpd_pid in $(printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^httpd/ { print $2 }' | LC_ALL=C sort -u); do
+            if run_timeout 20 lsof -nP -p "$httpd_pid" 2>/dev/null | LC_ALL=C grep -qiE 'libphp|mod_php'; then
+              listening="yes"
+            fi
+          done
+        else
+          listening="unknown"
         fi
-      done
-    else
-      listening="unknown"
-    fi
-  else
-    listening="unknown"
-  fi
+      else
+        listening="unknown"
+      fi
+      ;;
+    node)
+      if [ -n "${RH_NODE_CANDIDATES+x}" ]; then
+        printf '%s\n' "$RH_NODE_CANDIDATES" >> "$candidates"
+      else
+        type -aP node 2>/dev/null >> "$candidates" || true
+        if command -v brew >/dev/null 2>&1; then
+          brew_prefix="$(brew --prefix 2>/dev/null || true)"
+          if [ -n "$brew_prefix" ]; then
+            [ -x "$brew_prefix/opt/node/bin/node" ] && printf '%s\n' "$brew_prefix/opt/node/bin/node" >> "$candidates"
+            for bin in "$brew_prefix"/opt/node@*/bin/node; do
+              [ -x "$bin" ] && printf '%s\n' "$bin" >> "$candidates"
+            done
+          fi
+        fi
+        nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+        for bin in "$nvm_dir"/versions/node/*/bin/node; do
+          [ -x "$bin" ] && printf '%s\n' "$bin" >> "$candidates"
+        done
+      fi
+      ;;
+    *) return ;;
+  esac
 
   while IFS= read -r bin; do
     [ -x "$bin" ] || continue
@@ -834,55 +863,88 @@ check_php_security() {
       LC_ALL=C grep -Fqx "$keg" "$kegs" 2>/dev/null && continue
       printf '%s\n' "$keg" >> "$kegs"
     fi
-    case "$(basename -- "$bin")" in
-      php-fpm*)
-        kind="php-fpm"
-        version="$(run_timeout 20 "$bin" -v 2>/dev/null | sed -n '1{s/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p;q;}')"
-        ;;
-      *)
-        kind="php"
-        version="$(run_timeout 20 "$bin" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
-        version="$(printf '%s' "$version" | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-        ;;
-    esac
+    if [ "$component" = "php" ]; then
+      case "$(basename -- "$bin")" in
+        php-fpm*)
+          kind="php-fpm"
+          version="$(run_timeout 20 "$bin" -v 2>/dev/null | sed -n '1{s/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p;q;}')"
+          ;;
+        *)
+          kind="php"
+          version="$(run_timeout 20 "$bin" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+          version="$(printf '%s' "$version" | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          ;;
+      esac
+    else
+      kind="node"
+      version="$(run_timeout 20 "$bin" -p 'process.versions.node' 2>/dev/null || true)"
+      version="$(printf '%s' "$version" | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    fi
     if [ -z "$version" ]; then
       NOTES[${#NOTES[@]}]="${kind}（${bin}）— 版を判定できず未検査"
       continue
     fi
     series="${version%.*}"
+    major="${version%%.*}"
     minimum=""; reason=""; eol_threshold=""; eol_reason=""
-    while IFS=$'\t' read -r component row_series row_minimum row_reason; do
-      case "$component" in ''|\#*) continue;; esac
-      [ "$component" = "php" ] || continue
+    policy_level=0
+    while IFS=$'\t' read -r row_component row_series row_minimum row_reason; do
+      case "$row_component" in ''|\#*) continue;; esac
+      [ "$row_component" = "$component" ] || continue
       if [ "$row_series" = "$series" ]; then
         minimum="$row_minimum"; reason="$row_reason"
+        policy_level=2
+      elif [ "$row_series" = "$major" ] && [ "$policy_level" -lt 2 ]; then
+        minimum="$row_minimum"; reason="$row_reason"
+        policy_level=1
       elif [ "$row_series" = "EOL" ]; then
         eol_threshold="$row_minimum"; eol_reason="$row_reason"
       fi
     done < "$SECURITY_MINIMUMS"
     matched="no"
-    if [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
+    if [ "$minimum" = "EOL" ]; then
+      matched="eol"
+    elif [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
       matched="minimum"
     elif [ -n "$eol_threshold" ] && version_less_than "$version" "$eol_threshold"; then
       matched="eol"
       reason="$eol_reason"
     fi
-    if [ "$matched" = "no" ]; then
+    if [ "$matched" = "no" ] && [ "$component" = "php" ]; then
       security_detail "$kind ${version}（${bin}）— 最低版を満たしています"
       continue
     fi
-    suffix=""
-    [ "$listening" != "unknown" ] || suffix="（待ち受けの有無は未検査）"
-    if [ "$matched" = "eol" ]; then
-      if [ "$listening" = "yes" ]; then
-        add_failure "PHP ${version}（${bin}）がサーバーとして動いています。サポート終了の系列です（${reason}）。サポート中の版へ更新してください"
+    if [ "$component" = "php" ]; then
+      suffix=""
+      [ "$listening" != "unknown" ] || suffix="（待ち受けの有無は未検査）"
+      if [ "$matched" = "eol" ]; then
+        if [ "$listening" = "yes" ]; then
+          add_failure "PHP ${version}（${bin}）がサーバーとして動いています。サポート終了の系列です（${reason}）。サポート中の版へ更新してください"
+        else
+          add_warning "PHP ${version}（${bin}）はサポート終了の系列です（${reason}）${suffix}。使っていなければ brew uninstall php、使うならサポート中の版へ更新してください"
+        fi
+      elif [ "$listening" = "yes" ]; then
+        add_failure "PHP ${version}（${bin}）がサーバーとして動いています。${reason}の修正版 $minimum 以上へ更新してください"
       else
-        add_warning "PHP ${version}（${bin}）はサポート終了の系列です（${reason}）${suffix}。使っていなければ brew uninstall php、使うならサポート中の版へ更新してください"
+        add_warning "PHP ${version}（${bin}）は修正版 $minimum より古い版です（${reason}）${suffix}。使っていなければ brew uninstall php、使うなら修正版が出しだい brew upgrade php"
       fi
-    elif [ "$listening" = "yes" ]; then
-      add_failure "PHP ${version}（${bin}）がサーバーとして動いています。${reason}の修正版 $minimum 以上へ更新してください"
+    elif [ "$matched" = "no" ]; then
+      security_detail "node ${version}（${bin}）— 最低版を満たしています"
+    elif [ "$matched" = "eol" ]; then
+      add_warning "Node ${version}（${bin}）はサポート終了の系列です（${reason}）。サポート中の系列（22・24・26 など）へ移ってください"
     else
-      add_warning "PHP ${version}（${bin}）は修正版 $minimum より古い版です（${reason}）${suffix}。使っていなければ brew uninstall php、使うなら修正版が出しだい brew upgrade php"
+      remedy="入れた方法で最新版へ更新してください"
+      if [ -n "$keg" ]; then
+        formula="${keg%/*}"
+        formula="${formula##*/}"
+        remedy="brew upgrade ${formula}（Homebrew に修正版が出しだい）"
+      else
+        nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+        case "$real" in
+          "$nvm_dir"/versions/node/*) remedy="nvm install ${major} で最新の ${major}.x へ" ;;
+        esac
+      fi
+      add_warning "Node ${version}（${bin}）は修正版 $minimum より古い版です（${reason}）。${remedy}"
     fi
   done < "$candidates"
 }
@@ -1082,7 +1144,8 @@ check_mac_security() {
     return
   fi
   check_brew_security
-  check_php_security
+  check_minimum_versions php
+  check_minimum_versions node
   check_tls_security
   check_software_updates
   check_kit_update

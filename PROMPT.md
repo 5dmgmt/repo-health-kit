@@ -1,12 +1,12 @@
 # Claude Code に頼むときのプロンプト
 
-Claude Code（ターミナル版、またはデスクトップアプリの Code タブ）に、次の枠の中をそのまま貼り付けてください。Claude Code が README を読みながら、入れる・設定する・初回の点検までを一緒に進めます。0.2.0 から、リポジトリに加えて Mac のセキュリティ（Homebrew の部品・PHP・証明書・macOS のアップデート）も点検します。
+Claude Code（ターミナル版、またはデスクトップアプリの Code タブ）に、次の枠の中をそのまま貼り付けてください。Claude Code が README を読みながら、入れる・設定する・初回の点検までを一緒に進めます。リポジトリに加えて Mac のセキュリティ（Homebrew の部品・PHP・Node.js・証明書・macOS のアップデート）も点検します。
 
 入れたあとで、毎朝のメールに「新しい版があります」と届いたときは、[下の短いプロンプト](#新しい版のお知らせが届いたとき)をお使いください。
 
 ```text
 私の Mac に repo-health-kit を入れて設定するのを手伝ってください。
-repo-health-kit は、Mac にある git リポジトリと、Mac のセキュリティ（Homebrew の部品・PHP・証明書・macOS のアップデート）を毎朝点検し、対応が必要なことがあればメールとデスクトップ通知で知らせる道具です。
+repo-health-kit は、Mac にある git リポジトリと、Mac のセキュリティ（Homebrew の部品・PHP・Node.js・証明書・macOS のアップデート）を毎朝点検し、対応が必要なことがあればメールとデスクトップ通知で知らせる道具です。
 公開リポジトリ: https://github.com/5dmgmt/repo-health-kit
 
 進め方:
