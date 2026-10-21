@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$PATH:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export GIT_TERMINAL_PROMPT=0
 export npm_config_update_notifier=false
 
@@ -52,6 +52,7 @@ check_config_safety() {
 RH_ENV_ROOTS_SET="${RH_ROOTS+x}"; RH_ENV_ROOTS_VALUE="${RH_ROOTS-}"
 RH_ENV_SKIP_AUDIT_SET="${RH_SKIP_AUDIT+x}"; RH_ENV_SKIP_AUDIT_VALUE="${RH_SKIP_AUDIT-}"
 RH_ENV_SKIP_CLI_SET="${RH_SKIP_CLI+x}"; RH_ENV_SKIP_CLI_VALUE="${RH_SKIP_CLI-}"
+RH_ENV_SKIP_SECURITY_SET="${RH_SKIP_SECURITY+x}"; RH_ENV_SKIP_SECURITY_VALUE="${RH_SKIP_SECURITY-}"
 RH_ENV_SKIP_FETCH_SET="${RH_SKIP_FETCH+x}"; RH_ENV_SKIP_FETCH_VALUE="${RH_SKIP_FETCH-}"
 RH_ENV_NO_DESKTOP_SET="${RH_NO_DESKTOP+x}"; RH_ENV_NO_DESKTOP_VALUE="${RH_NO_DESKTOP-}"
 if [ -z "$RH_ENV_ROOTS_SET" ]; then
@@ -71,7 +72,13 @@ fi
 : "${RH_STALE_DAYS_FAIL:=7}"
 : "${RH_SKIP_AUDIT:=0}"
 : "${RH_SKIP_CLI:=0}"
+: "${RH_SKIP_SECURITY:=0}"
 : "${RH_SKIP_FETCH:=0}"
+: "${RH_AUTOFIX_CA_CERTS:=1}"
+: "${RH_AUTOFIX_SECURITY:=0}"
+: "${RH_TLS_PROBE:=1}"
+: "${RH_SKIP_SOFTWAREUPDATE:=0}"
+: "${RH_KIT_UPDATE_CHECK:=1}"
 : "${RH_NOMAIL:=0}"
 : "${RH_NO_DESKTOP:=0}"
 
@@ -84,6 +91,7 @@ fi
 [ -z "$RH_ENV_ROOTS_SET" ] || RH_ROOTS=("$RH_ENV_ROOTS_VALUE")
 [ -z "$RH_ENV_SKIP_AUDIT_SET" ] || RH_SKIP_AUDIT="$RH_ENV_SKIP_AUDIT_VALUE"
 [ -z "$RH_ENV_SKIP_CLI_SET" ] || RH_SKIP_CLI="$RH_ENV_SKIP_CLI_VALUE"
+[ -z "$RH_ENV_SKIP_SECURITY_SET" ] || RH_SKIP_SECURITY="$RH_ENV_SKIP_SECURITY_VALUE"
 [ -z "$RH_ENV_SKIP_FETCH_SET" ] || RH_SKIP_FETCH="$RH_ENV_SKIP_FETCH_VALUE"
 [ -z "$RH_ENV_NO_DESKTOP_SET" ] || RH_NO_DESKTOP="$RH_ENV_NO_DESKTOP_VALUE"
 
@@ -98,7 +106,13 @@ is_uint "$RH_STALE_BEHIND_THRESHOLD" || fatal "RH_STALE_BEHIND_THRESHOLD は0以
 is_uint "$RH_STALE_DAYS_FAIL" || fatal "RH_STALE_DAYS_FAIL は0以上の整数で指定してください"
 is_uint "$RH_SKIP_AUDIT" || fatal "RH_SKIP_AUDIT は0以上の整数で指定してください"
 is_uint "$RH_SKIP_CLI" || fatal "RH_SKIP_CLI は0以上の整数で指定してください"
+is_uint "$RH_SKIP_SECURITY" || fatal "RH_SKIP_SECURITY は0以上の整数で指定してください"
 is_uint "$RH_SKIP_FETCH" || fatal "RH_SKIP_FETCH は0以上の整数で指定してください"
+is_uint "$RH_AUTOFIX_CA_CERTS" || fatal "RH_AUTOFIX_CA_CERTS は0以上の整数で指定してください"
+is_uint "$RH_AUTOFIX_SECURITY" || fatal "RH_AUTOFIX_SECURITY は0以上の整数で指定してください"
+is_uint "$RH_TLS_PROBE" || fatal "RH_TLS_PROBE は0以上の整数で指定してください"
+is_uint "$RH_SKIP_SOFTWAREUPDATE" || fatal "RH_SKIP_SOFTWAREUPDATE は0以上の整数で指定してください"
+is_uint "$RH_KIT_UPDATE_CHECK" || fatal "RH_KIT_UPDATE_CHECK は0以上の整数で指定してください"
 is_uint "$RH_NOMAIL" || fatal "RH_NOMAIL は0以上の整数で指定してください"
 is_uint "$RH_NO_DESKTOP" || fatal "RH_NO_DESKTOP は0以上の整数で指定してください"
 
@@ -110,6 +124,9 @@ REPORT="$LOG_DIR/repo-health-latest.md"
 DENYLIST="${RH_DENYLIST:-$KIT_DIR/config/pkg-denylist.tsv}"
 DENY_SCANNER="${RH_DENY_SCANNER:-$SCRIPT_DIR/pkg-denylist-scan.py}"
 VULN_ALLOW_FILE="${RH_VULN_ALLOW_FILE:-$HOME/.config/repo-health-kit/vuln-allow.tsv}"
+SECURITY_PACKAGES="${RH_SECURITY_PACKAGES:-$KIT_DIR/config/security-packages.txt}"
+SECURITY_MINIMUMS="${RH_SECURITY_MINIMUMS:-$KIT_DIR/config/security-minimums.tsv}"
+TLS_PROBES="${RH_TLS_PROBES:-$KIT_DIR/config/tls-probes.tsv}"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR" || fatal "ログまたは状態の保存先を作成できません"
 chmod 700 "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
@@ -303,8 +320,70 @@ EOF
   add_detail "$label — npm audit(prod): ${critical} critical / ${high} high / ${_moderate} moderate / ${_low} low"
 }
 
+audit_composer_lock() {
+  local repo="$1" repo_name="$2" lock="$3" manifest_dir rel label output counts
+  local critical high medium low unknown allow_row composer_path
+  manifest_dir="$(dirname -- "$lock")"
+  rel="${manifest_dir#"$repo"/}"
+  if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$rel"; fi
+  if [ "$RH_SKIP_AUDIT" = "1" ]; then
+    add_detail "$label — composer audit は RH_SKIP_AUDIT=1 のため未検査"
+    return
+  fi
+  composer_path="${RH_COMPOSER_PATH-$(command -v composer 2>/dev/null || true)}"
+  if [ -z "$composer_path" ]; then
+    add_warning "$label — composer audit 実行不能（composer 不在）"
+    return
+  fi
+  output="$TMP_DIR/composer-audit-$(streak_key "$lock").json"
+  (cd "$manifest_dir" && run_timeout 120 "$composer_path" audit --locked --no-dev --format=json --no-interaction > "$output" 2>/dev/null) || true
+  counts="$(python3 - "$output" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+    advisories = data.get("advisories")
+    if not isinstance(advisories, (dict, list)):
+        raise ValueError
+    entries = []
+    values = advisories.values() if isinstance(advisories, dict) else advisories
+    for value in values:
+        if isinstance(value, list):
+            entries.extend(item for item in value if isinstance(item, dict))
+        elif isinstance(value, dict):
+            entries.append(value)
+    counts = {key: 0 for key in ("critical", "high", "medium", "low", "unknown")}
+    for advisory in entries:
+        severity = str(advisory.get("severity", "")).lower()
+        counts[severity if severity in counts else "unknown"] += 1
+    print("|".join(str(counts[key]) for key in ("critical", "high", "medium", "low", "unknown")))
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    pass
+PY
+)"
+  if [ -z "$counts" ]; then
+    add_warning "$label — composer audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
+    return
+  fi
+  IFS='|' read -r critical high medium low unknown <<EOF
+$counts
+EOF
+  if [ $((critical + high)) -gt 0 ]; then
+    if allow_row="$(vulnerability_allowed "$repo_name")"; then
+      NOTES[${#NOTES[@]}]="$label — 本番 critical/high は期限付き据え置き（${allow_row}）"
+    else
+      add_failure "$label — 本番依存に critical/high 脆弱性（composer）"
+    fi
+  elif [ "$unknown" -gt 0 ]; then
+    add_warning "$label — composer audit に重さ不明の指摘 ${unknown}件"
+  fi
+  add_detail "$label — composer audit(prod): ${critical} critical / ${high} high / ${medium} medium / ${low} low / ${unknown} unknown"
+}
+
 scan_manifests() {
-  local repo="$1" repo_name="$2" manifest list
+  local repo="$1" repo_name="$2" manifest list composer_list
   list="$TMP_DIR/manifests-$(streak_key "$repo").list"
   : > "$list"
   [ -f "$repo/package.json" ] && printf '%s\0' "$repo/package.json" >> "$list"
@@ -314,6 +393,16 @@ scan_manifests() {
   while IFS= read -r -d '' manifest; do
     audit_manifest "$repo" "$repo_name" "$manifest"
   done < "$list"
+
+  composer_list="$TMP_DIR/composer-locks-$(streak_key "$repo").list"
+  : > "$composer_list"
+  [ -f "$repo/composer.lock" ] && printf '%s\0' "$repo/composer.lock" >> "$composer_list"
+  while IFS= read -r -d '' manifest; do
+    printf '%s\0' "$repo/$manifest" >> "$composer_list"
+  done < <(git -C "$repo" -c core.quotepath=false ls-files -z -- '*/composer.lock' 2>/dev/null)
+  while IFS= read -r -d '' manifest; do
+    audit_composer_lock "$repo" "$repo_name" "$manifest"
+  done < "$composer_list"
 }
 
 scan_denylist() {
@@ -590,6 +679,415 @@ check_cli_tools() {
   done
 }
 
+security_detail() {
+  add_detail "Mac のセキュリティ — $*"
+}
+
+check_brew_security() {
+  local outdated_json rows remaining name installed latest description failed_description
+  local upgrade_description brew_prefix
+  command -v brew >/dev/null 2>&1 || return
+  if ! run_timeout 300 brew update --quiet >/dev/null 2>&1; then
+    NOTES[${#NOTES[@]}]="Homebrew の更新情報を取得できず未検査"
+    return
+  fi
+  if [ ! -f "$SECURITY_PACKAGES" ]; then
+    NOTES[${#NOTES[@]}]="Homebrew のセキュリティ部品は同梱リスト不足のため未検査"
+    return
+  fi
+  outdated_json="$TMP_DIR/brew-outdated.json"
+  if ! run_timeout 300 brew outdated --json=v2 > "$outdated_json" 2>/dev/null; then
+    NOTES[${#NOTES[@]}]="Homebrew のセキュリティ部品は更新待ちを取得できず未検査"
+    return
+  fi
+  rows="$TMP_DIR/brew-security.tsv"
+  if ! python3 - "$outdated_json" "$SECURITY_PACKAGES" > "$rows" 2>/dev/null <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+patterns = []
+with open(sys.argv[2], encoding="utf-8") as handle:
+    for raw in handle:
+        value = raw.strip()
+        if value and not value.startswith("#"):
+            patterns.append(value)
+formulae = data.get("formulae")
+if not isinstance(formulae, list):
+    raise SystemExit(1)
+for formula in formulae:
+    if not isinstance(formula, dict):
+        continue
+    name = str(formula.get("name", ""))
+    if not any(name.startswith(item[:-1]) if item.endswith("*") else name == item for item in patterns):
+        continue
+    installed = formula.get("installed_versions", [])
+    old = ",".join(str(item) for item in installed) if isinstance(installed, list) else str(installed)
+    new = formula.get("current_version") or formula.get("stable") or "不明"
+    print(f"{name}\t{old or '不明'}\t{new}")
+PY
+  then
+    NOTES[${#NOTES[@]}]="Homebrew のセキュリティ部品は応答不正のため未検査"
+    return
+  fi
+  if [ ! -s "$rows" ]; then
+    security_detail "Homebrew のセキュリティ部品は更新待ちなし"
+    return
+  fi
+
+  remaining="$TMP_DIR/brew-security-remaining.tsv"
+  : > "$remaining"
+  failed_description=""
+  while IFS=$'\t' read -r name installed latest; do
+    if [ "$name" = "ca-certificates" ] && [ "$RH_AUTOFIX_CA_CERTS" = "1" ]; then
+      # 名指しした部品だけを上げる（Homebrew は既定で、依存する別の部品の更新も一緒に行うため）
+      if HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 600 brew upgrade ca-certificates >/dev/null 2>&1; then
+        AUTOFIXED[${#AUTOFIXED[@]}]="ca-certificates — 証明書リスト ${installed} → ${latest} を自動更新"
+      else
+        failed_description="ca-certificates の自動更新に失敗しました（brew upgrade を手で実行してください）"
+      fi
+    else
+      printf '%s\t%s\t%s\n' "$name" "$installed" "$latest" >> "$remaining"
+    fi
+  done < "$rows"
+  [ -z "$failed_description" ] || add_warning "$failed_description"
+  [ -s "$remaining" ] || return
+
+  if [ "$RH_AUTOFIX_SECURITY" = "1" ]; then
+    set --
+    while IFS=$'\t' read -r name _installed _latest; do
+      set -- "$@" "$name"
+    done < "$remaining"
+    if HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 900 brew upgrade "$@" >/dev/null 2>&1; then
+      while IFS=$'\t' read -r name installed latest; do
+        AUTOFIXED[${#AUTOFIXED[@]}]="$name — セキュリティ部品 $installed → $latest を自動更新"
+      done < "$remaining"
+      return
+    fi
+    upgrade_description=""
+    while IFS=$'\t' read -r name _installed _latest; do
+      if [ -z "$upgrade_description" ]; then upgrade_description="$name"; else upgrade_description="${upgrade_description}、$name"; fi
+    done < "$remaining"
+    add_warning "$upgrade_description の自動更新に失敗しました（brew upgrade を手で実行してください）"
+    return
+  fi
+
+  description=""
+  while IFS=$'\t' read -r name installed latest; do
+    if [ -z "$description" ]; then
+      description="$name $installed → $latest"
+    else
+      description="${description}、$name $installed → $latest"
+    fi
+  done < "$remaining"
+  add_warning "Mac のセキュリティ部品に更新が出ています: ${description}（brew upgrade で更新できます）"
+  brew_prefix="$(brew --prefix 2>/dev/null || true)"
+  [ -z "$brew_prefix" ] || security_detail "Homebrew: $brew_prefix"
+}
+
+check_php_security() {
+  local candidates seen bin real version series minimum reason eol_threshold eol_reason
+  local listening lsof_output suffix kind matched httpd_pid keg kegs
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="PHP の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  candidates="$TMP_DIR/php-candidates.list"
+  seen="$TMP_DIR/php-seen.list"
+  kegs="$TMP_DIR/php-kegs.list"
+  : > "$candidates"
+  : > "$seen"
+  : > "$kegs"
+  type -aP php 2>/dev/null >> "$candidates" || true
+  type -aP php-fpm 2>/dev/null >> "$candidates" || true
+  [ -x /opt/homebrew/sbin/php-fpm ] && printf '%s\n' /opt/homebrew/sbin/php-fpm >> "$candidates"
+  [ -x /usr/local/sbin/php-fpm ] && printf '%s\n' /usr/local/sbin/php-fpm >> "$candidates"
+
+  listening="no"
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof_output="$(run_timeout 20 lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null)"; then
+      if printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^php/ { found=1 } END { exit !found }'; then
+        listening="yes"
+      fi
+      # httpd は PHP を読み込んでいる（mod_php）ときだけ数える。PHP を使わない Apache で FAIL にしない
+      for httpd_pid in $(printf '%s\n' "$lsof_output" | awk 'NR > 1 && $1 ~ /^httpd/ { print $2 }' | LC_ALL=C sort -u); do
+        if run_timeout 20 lsof -nP -p "$httpd_pid" 2>/dev/null | LC_ALL=C grep -qiE 'libphp|mod_php'; then
+          listening="yes"
+        fi
+      done
+    else
+      listening="unknown"
+    fi
+  else
+    listening="unknown"
+  fi
+
+  while IFS= read -r bin; do
+    [ -x "$bin" ] || continue
+    real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$bin" 2>/dev/null || printf '%s' "$bin")"
+    LC_ALL=C grep -Fqx "$real" "$seen" 2>/dev/null && continue
+    printf '%s\n' "$real" >> "$seen"
+    # Homebrew の同じ版（keg）の php と php-fpm は1件にまとめる
+    keg="$(printf '%s\n' "$real" | sed -n 's#^\(.*/Cellar/[^/][^/]*/[^/][^/]*\)/.*#\1#p')"
+    if [ -n "$keg" ]; then
+      LC_ALL=C grep -Fqx "$keg" "$kegs" 2>/dev/null && continue
+      printf '%s\n' "$keg" >> "$kegs"
+    fi
+    case "$(basename -- "$bin")" in
+      php-fpm*)
+        kind="php-fpm"
+        version="$(run_timeout 20 "$bin" -v 2>/dev/null | sed -n '1{s/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p;q;}')"
+        ;;
+      *)
+        kind="php"
+        version="$(run_timeout 20 "$bin" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+        version="$(printf '%s' "$version" | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        ;;
+    esac
+    if [ -z "$version" ]; then
+      NOTES[${#NOTES[@]}]="${kind}（${bin}）— 版を判定できず未検査"
+      continue
+    fi
+    series="${version%.*}"
+    minimum=""; reason=""; eol_threshold=""; eol_reason=""
+    while IFS=$'\t' read -r component row_series row_minimum row_reason; do
+      case "$component" in ''|\#*) continue;; esac
+      [ "$component" = "php" ] || continue
+      if [ "$row_series" = "$series" ]; then
+        minimum="$row_minimum"; reason="$row_reason"
+      elif [ "$row_series" = "EOL" ]; then
+        eol_threshold="$row_minimum"; eol_reason="$row_reason"
+      fi
+    done < "$SECURITY_MINIMUMS"
+    matched="no"
+    if [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
+      matched="minimum"
+    elif [ -n "$eol_threshold" ] && version_less_than "$version" "$eol_threshold"; then
+      matched="eol"
+      reason="$eol_reason"
+    fi
+    if [ "$matched" = "no" ]; then
+      security_detail "$kind ${version}（${bin}）— 最低版を満たしています"
+      continue
+    fi
+    suffix=""
+    [ "$listening" != "unknown" ] || suffix="（待ち受けの有無は未検査）"
+    if [ "$matched" = "eol" ]; then
+      if [ "$listening" = "yes" ]; then
+        add_failure "PHP ${version}（${bin}）がサーバーとして動いています。サポート終了の系列です（${reason}）。サポート中の版へ更新してください"
+      else
+        add_warning "PHP ${version}（${bin}）はサポート終了の系列です（${reason}）${suffix}。使っていなければ brew uninstall php、使うならサポート中の版へ更新してください"
+      fi
+    elif [ "$listening" = "yes" ]; then
+      add_failure "PHP ${version}（${bin}）がサーバーとして動いています。${reason}の修正版 $minimum 以上へ更新してください"
+    else
+      add_warning "PHP ${version}（${bin}）は修正版 $minimum より古い版です（${reason}）${suffix}。使っていなければ brew uninstall php、使うなら修正版が出しだい brew upgrade php"
+    fi
+  done < "$candidates"
+}
+
+tls_probe_once() {
+  local kind="$1" path="$2" url="$3" rc
+  case "$kind" in
+    curl)
+      run_timeout 15 "$path" -sS --max-time 14 -o /dev/null "$url" >/dev/null 2>&1
+      rc=$?
+      [ "$rc" -eq 0 ] && return 0
+      [ "$rc" -eq 60 ] && return 60
+      return 1
+      ;;
+    node)
+      run_timeout 15 "$path" -e '
+const url = process.argv[1];
+fetch(url, {redirect: "manual"}).then(() => process.exit(0)).catch((error) => {
+  const code = String(error && error.cause && error.cause.code || "");
+  process.exit(/^(CERT_|UNABLE_TO_|SELF_SIGNED|DEPTH_ZERO|ERR_TLS_CERT)/.test(code) ? 60 : 1);
+});' "$url" >/dev/null 2>&1
+      return $?
+      ;;
+    python)
+      run_timeout 15 "$path" -I - "$url" >/dev/null 2>&1 <<'PY'
+import ssl
+import sys
+import urllib.error
+import urllib.request
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+try:
+    opener = urllib.request.build_opener(NoRedirect)
+    with opener.open(sys.argv[1], timeout=14):
+        pass
+except urllib.error.HTTPError:
+    raise SystemExit(0)
+except urllib.error.URLError as error:
+    reason = error.reason
+    if isinstance(reason, ssl.SSLCertVerificationError) or (
+        isinstance(reason, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    ):
+        raise SystemExit(60)
+    raise SystemExit(1)
+except ssl.SSLError as error:
+    raise SystemExit(60 if "CERTIFICATE_VERIFY_FAILED" in str(error) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+      return $?
+      ;;
+  esac
+  return 1
+}
+
+check_tls_security() {
+  local tools apple_curl apple_python brew_curl node_path python_path brew_prefix
+  local label kind path remedy url subject connected rejected unknown rc apple_connected
+  local python_formula python_remedy connected_subject apple_subject
+  if [ "$RH_TLS_PROBE" = "0" ]; then
+    NOTES[${#NOTES[@]}]="証明書の点検は RH_TLS_PROBE=0 のため未検査"
+    return
+  fi
+  if [ ! -f "$TLS_PROBES" ]; then
+    NOTES[${#NOTES[@]}]="証明書の点検は同梱リスト不足のため未検査"
+    return
+  fi
+  tools="$TMP_DIR/tls-tools.tsv"
+  : > "$tools"
+  apple_curl="${RH_PROBE_APPLE_CURL-/usr/bin/curl}"
+  [ -x "$apple_curl" ] && printf 'Apple の curl\tcurl\t%s\tApple\n' "$apple_curl" >> "$tools"
+  apple_python="${RH_PROBE_APPLE_PYTHON-/usr/bin/python3}"
+  if [ -n "${RH_PROBE_APPLE_PYTHON+x}" ] || { command -v xcode-select >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1; }; then
+    [ -x "$apple_python" ] && printf 'Apple の python3\tpython\t%s\tApple\n' "$apple_python" >> "$tools"
+  fi
+  if [ -n "${RH_PROBE_BREW_CURL+x}" ]; then
+    brew_curl="$RH_PROBE_BREW_CURL"
+  elif command -v brew >/dev/null 2>&1; then
+    brew_prefix="$(brew --prefix 2>/dev/null || true)"
+    brew_curl="$brew_prefix/opt/curl/bin/curl"
+  else
+    brew_curl=""
+  fi
+  [ -n "$brew_curl" ] && [ -x "$brew_curl" ] && printf 'Homebrew の curl\tcurl\t%s\tbrew upgrade curl ca-certificates\n' "$brew_curl" >> "$tools"
+  node_path="${RH_PROBE_NODE-$(command -v node 2>/dev/null || true)}"
+  [ -n "$node_path" ] && [ -x "$node_path" ] && printf 'Node\tnode\t%s\tbrew upgrade node（Homebrew 以外で入れた場合はその方法で最新版）\n' "$node_path" >> "$tools"
+  if [ -n "${RH_PROBE_PYTHON+x}" ]; then
+    python_path="$RH_PROBE_PYTHON"
+  else
+    python_path="$(command -v python3 2>/dev/null || true)"
+    [ "$python_path" != "/usr/bin/python3" ] || python_path=""
+  fi
+  if [ -n "$python_path" ] && [ -x "$python_path" ]; then
+    python_formula="$(python3 -c 'import os,re,sys; m=re.search(r"/Cellar/(python@[0-9.]+)/", os.path.realpath(sys.argv[1])); print(m.group(1) if m else "")' "$python_path" 2>/dev/null || true)"
+    if [ -n "$python_formula" ]; then
+      python_remedy="brew upgrade $python_formula ca-certificates"
+    else
+      python_remedy="python3 を入れた方法で最新版"
+    fi
+    printf 'Homebrew などの python3\tpython\t%s\t%s\n' "$python_path" "$python_remedy" >> "$tools"
+  fi
+
+  apple_connected=""; apple_subject=""
+  while IFS=$'\t' read -r label kind path remedy; do
+    connected=0; rejected=0; unknown=0; connected_subject=""
+    while IFS=$'\t' read -r url subject; do
+      case "$url" in ''|\#*) continue;; esac
+      tls_probe_once "$kind" "$path" "$url"
+      rc=$?
+      case "$rc" in
+        0) connected=$((connected + 1)); [ -n "$connected_subject" ] || connected_subject="${subject:-$url}" ;;
+        60) rejected=$((rejected + 1)) ;;
+        *) unknown=$((unknown + 1)) ;;
+      esac
+    done < "$TLS_PROBES"
+    if [ "$connected" -gt 0 ]; then
+      if [ "$remedy" = "Apple" ]; then
+        label="${label#Apple の }"
+        if [ -z "$apple_connected" ]; then apple_connected="$label"; else apple_connected="${apple_connected}・$label"; fi
+        [ -n "$apple_subject" ] || apple_subject="$connected_subject"
+      else
+        add_warning "$label が失効済みの証明書を信頼しています（${connected_subject}）。$remedy へ更新してください"
+      fi
+    elif [ "$rejected" -gt 0 ]; then
+      security_detail "$label — 失効済みの証明書を拒否（正常）"
+    else
+      NOTES[${#NOTES[@]}]="$label — 証明書の点検は接続できず未検査"
+    fi
+  done < "$tools"
+  if [ -n "$apple_connected" ]; then
+    NOTES[${#NOTES[@]}]="Apple の $apple_connected は失効済みの証明書をまだ信頼しています（${apple_subject}）。Apple の修正待ちです。ソフトウェアアップデートが出たら適用してください"
+  fi
+}
+
+check_software_updates() {
+  local output labels label security_labels other_labels
+  if [ "$RH_SKIP_SOFTWAREUPDATE" = "1" ]; then
+    NOTES[${#NOTES[@]}]="macOS のアップデート確認は RH_SKIP_SOFTWAREUPDATE=1 のため未検査"
+    return
+  fi
+  if ! command -v softwareupdate >/dev/null 2>&1; then
+    NOTES[${#NOTES[@]}]="macOS のアップデート確認は未検査"
+    return
+  fi
+  output="$TMP_DIR/softwareupdate.txt"
+  if ! run_timeout 180 softwareupdate -l > "$output" 2>/dev/null; then
+    NOTES[${#NOTES[@]}]="macOS のアップデート確認は未検査"
+    return
+  fi
+  labels="$(sed -n 's/^[[:space:]]*\*[[:space:]]*Label:[[:space:]]*//p' "$output")"
+  security_labels=""; other_labels=""
+  while IFS= read -r label; do
+    [ -n "$label" ] || continue
+    case "$label" in
+      *macOS*|*Security*)
+        if [ -z "$security_labels" ]; then security_labels="$label"; else security_labels="${security_labels}、$label"; fi
+        ;;
+      *)
+        if [ -z "$other_labels" ]; then other_labels="$label"; else other_labels="${other_labels}、$label"; fi
+        ;;
+    esac
+  done <<EOF
+$labels
+EOF
+  [ -z "$security_labels" ] || add_warning "macOS のアップデートが出ています: ${security_labels}（システム設定 → 一般 → ソフトウェアアップデート）"
+  [ -z "$other_labels" ] || security_detail "その他のアップデート: $other_labels"
+  if [ -z "$security_labels" ] && [ -z "$other_labels" ]; then
+    security_detail "macOS のアップデート待ちはありません"
+  fi
+}
+
+check_kit_update() {
+  local current latest
+  if [ "$RH_KIT_UPDATE_CHECK" = "0" ]; then
+    NOTES[${#NOTES[@]}]="repo-health-kit の更新確認は RH_KIT_UPDATE_CHECK=0 のため未検査"
+    return
+  fi
+  current="$(sed -n '1p' "$KIT_DIR/VERSION" 2>/dev/null || true)"
+  latest="$(run_timeout 20 curl -fsS https://raw.githubusercontent.com/5dmgmt/repo-health-kit/main/VERSION 2>/dev/null || true)"
+  latest="$(printf '%s' "$latest" | sed -n '1p')"
+  if ! printf '%s\n' "$current" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+    || ! printf '%s\n' "$latest" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+    NOTES[${#NOTES[@]}]="repo-health-kit の更新確認は未検査"
+  elif version_less_than "$current" "$latest"; then
+    add_warning "repo-health-kit の新しい版 $current → $latest があります。clone したフォルダで git pull し、./install.sh を実行してください"
+  else
+    security_detail "repo-health-kit $current — 更新待ちなし"
+  fi
+}
+
+check_mac_security() {
+  if [ "$RH_SKIP_SECURITY" = "1" ]; then
+    NOTES[${#NOTES[@]}]="Mac のセキュリティ点検は RH_SKIP_SECURITY=1 のため未検査"
+    return
+  fi
+  check_brew_security
+  check_php_security
+  check_tls_security
+  check_software_updates
+  check_kit_update
+}
+
 send_resend() {
   local subject="$1" body="$2" api_key payload
   [ -n "$RH_MAIL_TO" ] || { printf 'mail: RH_MAIL_TO が未設定です\n' >&2; return 1; }
@@ -670,6 +1168,7 @@ if [ "$repo_count" -eq 0 ]; then
 fi
 
 check_cli_tools
+check_mac_security
 
 fail_count=${#FAILURES[@]}
 warn_count=${#WARNINGS[@]}
@@ -688,7 +1187,7 @@ generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
   fi
   printf '\n## ② 自動で直したもの\n\n'
   if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf 'なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf -- '- %s\n' "$item"; done; fi
-  printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり）\n\n'
+  printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ）\n\n'
   printf -- '- 作業中: %s件\n- 同期待ち: %s件\n- CLI 更新あり: %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
   for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$item"; done
   for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$item"; done

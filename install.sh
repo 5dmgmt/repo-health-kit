@@ -30,7 +30,11 @@ chmod 700 "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" 2>/dev/null || true
 
 install -m 755 "$SCRIPT_DIR/bin/repo-health.sh" "$INSTALL_DIR/bin/repo-health.sh" || fail "本体をコピーできません"
 install -m 755 "$SCRIPT_DIR/bin/pkg-denylist-scan.py" "$INSTALL_DIR/bin/pkg-denylist-scan.py" || fail "照合スクリプトをコピーできません"
+install -m 644 "$SCRIPT_DIR/VERSION" "$INSTALL_DIR/VERSION" || fail "版情報をコピーできません"
 install -m 644 "$SCRIPT_DIR/config/pkg-denylist.tsv" "$INSTALL_DIR/config/pkg-denylist.tsv" || fail "照合リストをコピーできません"
+install -m 644 "$SCRIPT_DIR/config/security-packages.txt" "$INSTALL_DIR/config/security-packages.txt" || fail "セキュリティ部品リストをコピーできません"
+install -m 644 "$SCRIPT_DIR/config/security-minimums.tsv" "$INSTALL_DIR/config/security-minimums.tsv" || fail "最低版リストをコピーできません"
+install -m 644 "$SCRIPT_DIR/config/tls-probes.tsv" "$INSTALL_DIR/config/tls-probes.tsv" || fail "証明書点検リストをコピーできません"
 
 if [ ! -f "$CONFIG_FILE" ]; then
   install -m 600 "$SCRIPT_DIR/config/config.example.sh" "$CONFIG_FILE" || fail "設定ファイルを作成できません"
@@ -54,12 +58,14 @@ RH_SCHEDULE="09:20"
 RH_MAIL_METHOD="none"
 ENV_SKIP_AUDIT_SET="${RH_SKIP_AUDIT+x}"; ENV_SKIP_AUDIT_VALUE="${RH_SKIP_AUDIT-}"
 ENV_SKIP_CLI_SET="${RH_SKIP_CLI+x}"; ENV_SKIP_CLI_VALUE="${RH_SKIP_CLI-}"
+ENV_SKIP_SECURITY_SET="${RH_SKIP_SECURITY+x}"; ENV_SKIP_SECURITY_VALUE="${RH_SKIP_SECURITY-}"
 ENV_SKIP_FETCH_SET="${RH_SKIP_FETCH+x}"; ENV_SKIP_FETCH_VALUE="${RH_SKIP_FETCH-}"
 ENV_NO_DESKTOP_SET="${RH_NO_DESKTOP+x}"; ENV_NO_DESKTOP_VALUE="${RH_NO_DESKTOP-}"
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
 [ -z "$ENV_SKIP_AUDIT_SET" ] || RH_SKIP_AUDIT="$ENV_SKIP_AUDIT_VALUE"
 [ -z "$ENV_SKIP_CLI_SET" ] || RH_SKIP_CLI="$ENV_SKIP_CLI_VALUE"
+[ -z "$ENV_SKIP_SECURITY_SET" ] || RH_SKIP_SECURITY="$ENV_SKIP_SECURITY_VALUE"
 [ -z "$ENV_SKIP_FETCH_SET" ] || RH_SKIP_FETCH="$ENV_SKIP_FETCH_VALUE"
 [ -z "$ENV_NO_DESKTOP_SET" ] || RH_NO_DESKTOP="$ENV_NO_DESKTOP_VALUE"
 

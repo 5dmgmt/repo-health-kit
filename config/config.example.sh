@@ -24,6 +24,12 @@ RH_AUTOFIX_PULL=1
 # CLI のメジャー版遅れを自動更新します。初期値は安全のため 0 です。
 RH_AUTOFIX_CLI=0
 
+# 証明書リストだけを安全な範囲で自動更新します。止める場合は 0 です。
+RH_AUTOFIX_CA_CERTS=1
+
+# Homebrew のほかのセキュリティ部品も自動更新します。初期値は安全のため 0 です。
+RH_AUTOFIX_SECURITY=0
+
 # fetch 失敗を FAIL にする連続日数です。
 RH_FETCH_FAIL_DAYS=2
 
@@ -45,6 +51,18 @@ RH_SCHEDULE="09:20"
 RH_SKIP_AUDIT=0
 RH_SKIP_CLI=0
 RH_SKIP_FETCH=0
+
+# Mac のセキュリティ点検をすべて止める場合だけ 1 にします。
+RH_SKIP_SECURITY=0
+
+# 失効済み証明書への接続点検を止める場合だけ 0 にします。
+RH_TLS_PROBE=1
+
+# macOS のアップデート確認を止める場合だけ 1 にします。
+RH_SKIP_SOFTWAREUPDATE=0
+
+# repo-health-kit 自身の更新確認を止める場合だけ 0 にします。
+RH_KIT_UPDATE_CHECK=1
 
 # 自動テストなどでデスクトップ通知も止める場合だけ 1 にします。
 RH_NO_DESKTOP=0

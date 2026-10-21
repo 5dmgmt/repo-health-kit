@@ -1,0 +1,13 @@
+ca-certificates
+openssl@3
+openssl@1.1
+curl
+git
+openssh
+node
+node@*
+python@*
+php
+php@*
+gnutls
+wget

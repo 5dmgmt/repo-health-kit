@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 以下では、実行時に展開させる変数を単一引用符で偽コマンドへ書き出します。
+# shellcheck disable=SC2016
+
 set -uo pipefail
 
 TEST_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
@@ -49,12 +52,87 @@ run_health() {
   RH_ROOTS="$root" \
   RH_LOG_DIR="$case_dir/log" \
   RH_STATE_DIR="$case_dir/state" \
-  RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 \
+  RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
   RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..15\n'
+run_security() {
+  local case_dir="$1" fake_bin="$2" output
+  shift 2
+  output="$case_dir/output.txt"
+  mkdir -p "$case_dir/home" "$case_dir/root"
+  env PATH="$fake_bin:$PATH" HOME="$case_dir/home" \
+    RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$case_dir/root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=0 \
+    RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
+    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+}
+
+make_fake_brew() {
+  local fake_bin="$1"
+  mkdir -p "$fake_bin"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;'
+    printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[]}'\''; fi ;;'
+    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
+    printf '%s\n' '  --prefix) printf "%s\n" "${FAKE_BREW_PREFIX:-/fake/homebrew}" ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$fake_bin/brew"
+  chmod +x "$fake_bin/brew"
+}
+
+make_fake_php() {
+  local fake_bin="$1"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  -r) printf "%s" "${FAKE_PHP_VERSION:?}" ;;'
+    printf '%s\n' '  -v) printf "PHP %s (fpm-fcgi)\n" "${FAKE_PHP_VERSION:?}" ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$fake_bin/php"
+  chmod +x "$fake_bin/php"
+}
+
+make_fake_lsof() {
+  local fake_bin="$1"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'printf "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"'
+    printf '%s\n' 'if [ "${2:-}" = "-p" ]; then [ "${FAKE_HTTPD_PHP:-0}" = "1" ] && printf "httpd 77 user txt REG 1,4 0 0 /opt/homebrew/opt/php/lib/httpd/modules/libphp.so\n"; exit 0; fi'
+    printf '%s\n' 'if [ "${FAKE_PHP_LISTEN:-0}" = "1" ]; then printf "php-fpm 42 user 3u IPv4 0t0 TCP *:9000 (LISTEN)\n"; fi'
+    printf '%s\n' 'if [ "${FAKE_HTTPD_LISTEN:-0}" = "1" ]; then printf "httpd 77 user 4u IPv6 0t0 TCP *:8080 (LISTEN)\n"; fi'
+  } > "$fake_bin/lsof"
+  chmod +x "$fake_bin/lsof"
+}
+
+make_exit_command() {
+  local path="$1" rc="$2"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf 'exit %s\n' "$rc"
+  } > "$path"
+  chmod +x "$path"
+}
+
+run_composer() {
+  local case_dir="$1" root="$2" composer_path="$3" output
+  output="$case_dir/output.txt"
+  mkdir -p "$case_dir/home"
+  HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=0 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
+    RH_COMPOSER_PATH="$composer_path" RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none \
+    RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
+}
+
+printf '1..42\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -144,8 +222,16 @@ assert_contains '--test-mail と none は送信しない' "$case_dir/output.txt"
 case_dir="$TEST_TMP/install"
 mkdir -p "$case_dir/home"
 HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_NO_DESKTOP=1 \
+  RH_SKIP_SECURITY=1 \
   bash "$PROJECT_DIR/install.sh" > "$case_dir/install-output.txt" 2>&1
 install_rc=$?
+installed_assets=0
+if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/VERSION" ] \
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-packages.txt" ] \
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-minimums.tsv" ] \
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/tls-probes.tsv" ]; then
+  installed_assets=1
+fi
 HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
 uninstall_rc=$?
 if [ "$install_rc" -eq 0 ] && [ "$uninstall_rc" -eq 0 ] \
@@ -156,12 +242,232 @@ else
   sed -n '1,160p' "$case_dir/install-output.txt"
   sed -n '1,80p' "$case_dir/uninstall-output.txt"
 fi
+if [ "$installed_assets" -eq 1 ]; then
+  pass 'install は版情報とセキュリティ判定表をコピーする'
+else
+  fail 'install は版情報とセキュリティ判定表をコピーする'
+fi
 if [ -f "$case_dir/home/.config/repo-health-kit/config.sh" ] \
   && [ -f "$case_dir/home/Library/Logs/repo-health-kit/repo-health-latest.md" ]; then
   pass 'uninstall 後も設定とログを残す'
 else
   fail 'uninstall 後も設定とログを残す'
 fi
+
+case_dir="$TEST_TMP/security-ca"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"}]}'
+assert_contains 'ca-certificates は既定で brew upgrade する' "$case_dir/brew.log" '^upgrade ca-certificates$'
+assert_contains 'ca-certificates の更新は依存する別の部品を巻き込まない' "$case_dir/brew.log" '^deps-check=1$'
+assert_contains 'ca-certificates の更新を自動修復へ出す' "$case_dir/output.txt" 'ca-certificates .*2026-09-25 → 2026-10-20 を自動更新'
+assert_not_contains 'ca-certificates の自動更新成功時は更新 WARN を出さない' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
+
+case_dir="$TEST_TMP/security-node-manual"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"}]}'
+assert_contains 'ca-certificates と node のうち ca は自動更新する' "$case_dir/output.txt" 'ca-certificates .*を自動更新'
+assert_contains 'RH_AUTOFIX_SECURITY=0 では node を WARN にする' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0'
+
+case_dir="$TEST_TMP/security-node-auto"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SECURITY=1 \
+  FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"}]}'
+assert_contains 'RH_AUTOFIX_SECURITY=1 では node も brew upgrade する' "$case_dir/brew.log" '^upgrade node$'
+assert_contains 'node の更新を自動修復へ出す' "$case_dir/output.txt" 'node .*26\.11\.1 → 26\.12\.0 を自動更新'
+assert_not_contains 'node の自動更新成功時は更新 WARN を出さない' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
+
+case_dir="$TEST_TMP/php-warn"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.11
+assert_contains '待ち受けなしの PHP 8.5.11 は WARN' "$case_dir/output.txt" 'WARN  PHP 8\.5\.11（.*fake-bin/php）.*8\.5\.12'
+assert_contains 'PHP の WARN に CVE を残す' "$case_dir/output.txt" 'CVE-2026-109618 / CVE-2026-109619'
+
+case_dir="$TEST_TMP/php-fail"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.11 FAKE_PHP_LISTEN=1
+assert_contains '待ち受け中の PHP 8.5.11 は FAIL' "$case_dir/output.txt" 'FAIL  PHP 8\.5\.11（.*fake-bin/php）がサーバーとして動いています'
+
+case_dir="$TEST_TMP/php-httpd-nophp"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.11 FAKE_HTTPD_LISTEN=1
+assert_contains 'PHP を読み込まない httpd の待ち受けでは WARN のまま' "$case_dir/output.txt" 'WARN  PHP 8\.5\.11（.*fake-bin/php）'
+assert_not_contains 'PHP を読み込まない httpd の待ち受けでは FAIL にしない' "$case_dir/output.txt" 'FAIL  PHP 8\.5\.11'
+
+case_dir="$TEST_TMP/php-httpd-modphp"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.11 FAKE_HTTPD_LISTEN=1 FAKE_HTTPD_PHP=1
+assert_contains 'mod_php を読み込んだ httpd の待ち受けは FAIL' "$case_dir/output.txt" 'FAIL  PHP 8\.5\.11（.*fake-bin/php）がサーバーとして動いています'
+
+case_dir="$TEST_TMP/php-same-keg"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_lsof "$fake_bin"
+mkdir -p "$case_dir/Cellar/php/8.5.11_1/bin" "$case_dir/Cellar/php/8.5.11_1/sbin"
+make_fake_php "$case_dir/Cellar/php/8.5.11_1/bin"
+cp "$case_dir/Cellar/php/8.5.11_1/bin/php" "$case_dir/Cellar/php/8.5.11_1/sbin/php-fpm"
+ln -s "$case_dir/Cellar/php/8.5.11_1/bin/php" "$fake_bin/php"
+ln -s "$case_dir/Cellar/php/8.5.11_1/sbin/php-fpm" "$fake_bin/php-fpm"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.11
+if [ "$(LC_ALL=C grep -cE 'WARN  PHP 8\.5\.11（.*php-same-keg/' "$case_dir/output.txt")" = "1" ]; then pass '同じ keg の php と php-fpm は WARN 1件にまとめる'; else fail '同じ keg の php と php-fpm は WARN 1件にまとめる'; sed -n '1,40p' "$case_dir/output.txt"; fi
+
+case_dir="$TEST_TMP/php-fixed"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.5.12
+assert_not_contains 'PHP 8.5.12 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  PHP 8\.5\.12（.*fake-bin/php）'
+
+case_dir="$TEST_TMP/php-eol"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_php "$fake_bin"
+make_fake_lsof "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_PHP_VERSION=8.1.30
+assert_contains 'PHP 8.1 はサポート終了の WARN' "$case_dir/output.txt" 'WARN  PHP 8\.1\.30（.*fake-bin/php）はサポート終了'
+
+case_dir="$TEST_TMP/tls-node"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_exit_command "$fake_bin/apple-curl" 60
+make_exit_command "$fake_bin/node" 0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TLS_PROBE=1 \
+  RH_PROBE_APPLE_CURL="$fake_bin/apple-curl" RH_PROBE_APPLE_PYTHON="$fake_bin/missing-apple-python" \
+  RH_PROBE_BREW_CURL="$fake_bin/missing-brew-curl" RH_PROBE_NODE="$fake_bin/node" RH_PROBE_PYTHON="$fake_bin/missing-python"
+assert_contains '接続できる Node は TLS の WARN' "$case_dir/output.txt" 'WARN  Node が失効済みの証明書を信頼しています'
+assert_contains 'TLS の WARN は tls-probes.tsv の件名を使う' "$case_dir/output.txt" '信頼しています（eMudhra 中間CAの鍵漏洩（2026-10-20 公表））'
+
+case_dir="$TEST_TMP/tls-apple"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_exit_command "$fake_bin/apple-curl" 0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TLS_PROBE=1 \
+  RH_PROBE_APPLE_CURL="$fake_bin/apple-curl" RH_PROBE_APPLE_PYTHON="$fake_bin/missing-apple-python" \
+  RH_PROBE_BREW_CURL="$fake_bin/missing-brew-curl" RH_PROBE_NODE="$fake_bin/missing-node" RH_PROBE_PYTHON="$fake_bin/missing-python"
+assert_contains '接続できる Apple curl は NOTES' "$case_dir/output.txt" 'Apple の curl は失効済みの証明書をまだ信頼しています'
+assert_not_contains '接続できる Apple curl は WARN にしない' "$case_dir/output.txt" 'WARN  Apple の curl'
+
+case_dir="$TEST_TMP/tls-reject"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_exit_command "$fake_bin/apple-curl" 60
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TLS_PROBE=1 \
+  RH_PROBE_APPLE_CURL="$fake_bin/apple-curl" RH_PROBE_APPLE_PYTHON="$fake_bin/missing-apple-python" \
+  RH_PROBE_BREW_CURL="$fake_bin/missing-brew-curl" RH_PROBE_NODE="$fake_bin/missing-node" RH_PROBE_PYTHON="$fake_bin/missing-python"
+assert_contains 'TLS 拒否は正常として detail に残す' "$case_dir/output.txt" 'Apple の curl — 失効済みの証明書を拒否（正常）'
+assert_not_contains 'TLS 拒否時は信頼中と報告しない' "$case_dir/output.txt" 'Apple の curl は失効済みの証明書をまだ信頼'
+
+case_dir="$TEST_TMP/tls-unknown"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_exit_command "$fake_bin/apple-curl" 6
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TLS_PROBE=1 \
+  RH_PROBE_APPLE_CURL="$fake_bin/apple-curl" RH_PROBE_APPLE_PYTHON="$fake_bin/missing-apple-python" \
+  RH_PROBE_BREW_CURL="$fake_bin/missing-brew-curl" RH_PROBE_NODE="$fake_bin/missing-node" RH_PROBE_PYTHON="$fake_bin/missing-python"
+assert_contains 'TLS の接続不能は未検査の NOTES' "$case_dir/output.txt" 'Apple の curl — 証明書の点検は接続できず未検査'
+
+case_dir="$TEST_TMP/software-macos"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "    * Label: %s\n" "${FAKE_UPDATE_LABEL:?}"'
+} > "$fake_bin/softwareupdate"
+chmod +x "$fake_bin/softwareupdate"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWAREUPDATE=0 FAKE_UPDATE_LABEL='macOS Tahoe 27.0.2'
+assert_contains 'macOS の更新は WARN' "$case_dir/output.txt" 'WARN  macOS のアップデートが出ています: macOS Tahoe 27\.0\.2'
+
+case_dir="$TEST_TMP/software-clt"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "    * Label: %s\n" "${FAKE_UPDATE_LABEL:?}"'
+} > "$fake_bin/softwareupdate"
+chmod +x "$fake_bin/softwareupdate"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWAREUPDATE=0 FAKE_UPDATE_LABEL='Command Line Tools for Xcode 27.0'
+assert_not_contains 'Command Line Tools だけなら macOS 更新 WARN は出さない' "$case_dir/output.txt" 'WARN  macOS のアップデートが出ています'
+assert_contains 'Command Line Tools は detail に残す' "$case_dir/output.txt" 'その他のアップデート: Command Line Tools for Xcode 27\.0'
+
+case_dir="$TEST_TMP/kit-disabled"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "called\n" >> "${FAKE_CURL_LOG:?}"'
+  printf '%s\n' 'printf "0.9.0\n"'
+} > "$fake_bin/curl"
+chmod +x "$fake_bin/curl"
+: > "$case_dir/brew.log"
+: > "$case_dir/curl.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=0
+if [ ! -s "$case_dir/curl.log" ]; then pass 'RH_KIT_UPDATE_CHECK=0 は curl を呼ばない'; else fail 'RH_KIT_UPDATE_CHECK=0 は curl を呼ばない'; fi
+
+case_dir="$TEST_TMP/kit-newer"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "called\n" >> "${FAKE_CURL_LOG:?}"'
+  printf '%s\n' 'printf "0.9.0\n"'
+} > "$fake_bin/curl"
+chmod +x "$fake_bin/curl"
+: > "$case_dir/brew.log"
+: > "$case_dir/curl.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.2\.0 → 0\.9\.0 があります'
+
+case_dir="$TEST_TMP/composer"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" composerrepo
+printf '%s\n' '{"packages":[]}' > "$REPO_PATH/composer.lock"
+composer_fake="$case_dir/composer"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "%s\n" '\''{"advisories":{"vendor/package":[{"severity":"high"}]}}'\'''
+  printf '%s\n' 'exit 1'
+} > "$composer_fake"
+chmod +x "$composer_fake"
+run_composer "$case_dir/high" "$case_dir/root with space" "$composer_fake"
+assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  composerrepo — 本番依存に critical/high 脆弱性（composer）'
+run_composer "$case_dir/absent" "$case_dir/root with space" ''
+assert_contains 'composer 不在は WARN' "$case_dir/absent/output.txt" 'WARN  composerrepo — composer audit 実行不能（composer 不在）'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"
