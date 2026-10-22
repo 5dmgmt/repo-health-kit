@@ -68,7 +68,7 @@ run_security() {
     RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=0 \
     RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
-    RH_NODE_CANDIDATES= \
+    RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
@@ -114,6 +114,26 @@ make_fake_node() {
   chmod +x "$fake_bin/node"
 }
 
+make_fake_java_home() {
+  local home="$1" version="$2"
+  mkdir -p "$home"
+  printf 'JAVA_VERSION="%s"\n' "$version" > "$home/release"
+}
+
+make_fake_docker() {
+  local path="$1"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'case "${1:-}" in'
+    printf '%s\n' '  info) exit "${FAKE_DOCKER_INFO_RC:-0}" ;;'
+    printf '%s\n' '  ps) printf "%b" "${FAKE_DOCKER_PS-}" ;;'
+    printf '%s\n' '  images) printf "%b" "${FAKE_DOCKER_IMAGES-}" ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$path"
+  chmod +x "$path"
+}
+
 make_fake_lsof() {
   local fake_bin="$1"
   {
@@ -146,7 +166,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..56\n'
+printf '1..76\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -194,6 +214,27 @@ git -C "$repo" add README.md
 git -C "$repo" commit -q -m 'test: initial'
 run_health "$case_dir" "$root"
 assert_contains 'origin 未設定は WARN' "$case_dir/output.txt" 'WARN  no-origin .*origin 未設定'
+
+case_dir="$TEST_TMP/gitlab-origin"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" gitlab-one
+git clone -q "$case_dir/origin.git" "$case_dir/root with space/gitlab-two" 2>/dev/null
+git -C "$case_dir/root with space/gitlab-one" remote set-url origin 'https://gitlab.example.co.jp/team/one.git'
+git -C "$case_dir/root with space/gitlab-two" remote set-url origin 'git@gitlab.example.co.jp:team/two.git'
+run_health "$case_dir" "$case_dir/root with space"
+if [ "$(LC_ALL=C grep -c 'gitlab.example.co.jp は自社で動かしている GitLab の可能性があります' "$case_dir/output.txt")" = "1" ]; then
+  pass '同じ自社 GitLab ホストは NOTES 1件にまとめる'
+else
+  fail '同じ自社 GitLab ホストは NOTES 1件にまとめる'
+  sed -n '1,120p' "$case_dir/output.txt"
+fi
+
+case_dir="$TEST_TMP/gitlab-com-origin"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" gitlab-com
+git -C "$REPO_PATH" remote set-url origin 'https://gitlab.com/team/repo.git'
+run_health "$case_dir" "$case_dir/root with space"
+assert_not_contains 'gitlab.com は自社 GitLab の NOTES を出さない' "$case_dir/output.txt" '自社で動かしている GitLab'
 
 case_dir="$TEST_TMP/dirty"
 mkdir -p "$case_dir"
@@ -435,6 +476,121 @@ run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
   RH_NODE_CANDIDATES="$fake_bin/node" FAKE_NODE_VERSION=
 assert_contains '版を返さない Node は未検査の NOTES' "$case_dir/output.txt" 'node（.*fake-bin/node）— 版を判定できず未検査'
 
+case_dir="$TEST_TMP/java-21-old"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/jdk-21-old/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_home" 21.0.12
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_contains 'Java 21.0.12 は修正版 21.0.13 より古い WARN' "$case_dir/output.txt" 'WARN  Java 21\.0\.12（.*jdk-21-old/Contents/Home）.*修正版 21\.0\.13'
+assert_contains 'Java の WARN に Oracle 10月定例更新の理由を含める' "$case_dir/output.txt" 'Java 21\.0\.12.*Oracle 2026年10月の定例更新（Java SE 55件）'
+
+case_dir="$TEST_TMP/java-21-fixed"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/jdk-21-fixed/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_home" 21.0.13
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_not_contains 'Java 21.0.13 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Java 21\.0\.13（'
+
+case_dir="$TEST_TMP/java-11-four-parts"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/jdk-11-old/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_home" 11.0.32.1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_contains 'Java 11.0.32.1 は4桁で比較して WARN' "$case_dir/output.txt" 'WARN  Java 11\.0\.32\.1（.*）.*修正版 11\.0\.33'
+
+case_dir="$TEST_TMP/java-8"
+fake_bin="$case_dir/fake-bin"
+java_old="$case_dir/jdk-8-old/Contents/Home"
+java_fixed="$case_dir/jdk-8-fixed/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_old" 1.8.0_504
+make_fake_java_home "$java_fixed" 1.8.0_511
+: > "$case_dir/brew.log"
+run_security "$case_dir/old" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_old"
+assert_contains 'Java 1.8.0_504 は 8u504 と表示して WARN' "$case_dir/old/output.txt" 'WARN  Java 8u504（.*）.*修正版 8\.0\.511'
+run_security "$case_dir/fixed" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_fixed"
+assert_not_contains 'Java 8u511 は要対応に出さない' "$case_dir/fixed/output.txt" '(WARN|FAIL)  Java 8u511（'
+
+case_dir="$TEST_TMP/java-eol"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/jdk-24/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_home" 24.0.2
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_contains 'Java 24 は * 行でサポート終了の WARN' "$case_dir/output.txt" 'WARN  Java 24\.0\.2（.*）はサポート終了の系列'
+
+case_dir="$TEST_TMP/java-no-release"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/jdk-no-release/Contents/Home"
+make_fake_brew "$fake_bin"
+mkdir -p "$java_home"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_contains 'release の無い Java は未検査の NOTES' "$case_dir/output.txt" 'java（.*jdk-no-release/Contents/Home）— 版を判定できず未検査'
+
+case_dir="$TEST_TMP/java-cellar"
+fake_bin="$case_dir/fake-bin"
+java_home="$case_dir/Cellar/openjdk@21/21.0.12/libexec/openjdk.jdk/Contents/Home"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_home" 21.0.12
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_JAVA_CANDIDATES="$java_home"
+assert_contains 'Homebrew の Java は formula 名つきの直し方を出す' "$case_dir/output.txt" 'brew upgrade openjdk@21（Homebrew に修正版が出しだい）'
+
+case_dir="$TEST_TMP/version-four-parts"
+fake_bin="$case_dir/fake-bin"
+java_old="$case_dir/jdk-old/Contents/Home"
+java_fixed="$case_dir/jdk-fixed/Contents/Home"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_java_home "$java_old" 11.0.32
+make_fake_java_home "$java_fixed" 11.0.32.1
+printf 'java\t11\t11.0.32.1\t4桁比較\njava\t*\tEOL\t終了\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir/old" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_MINIMUMS="$minimums" RH_JAVA_CANDIDATES="$java_old"
+assert_contains '11.0.32 は 11.0.32.1 より古い' "$case_dir/old/output.txt" 'WARN  Java 11\.0\.32（.*）.*修正版 11\.0\.32\.1'
+run_security "$case_dir/fixed" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_MINIMUMS="$minimums" RH_JAVA_CANDIDATES="$java_fixed"
+assert_not_contains '11.0.32.1 は同じ4桁の最低版を満たす' "$case_dir/fixed/output.txt" '(WARN|FAIL)  Java 11\.0\.32\.1（'
+
+case_dir="$TEST_TMP/gitlab-docker"
+fake_bin="$case_dir/fake-bin"
+docker_fake="$fake_bin/docker"
+make_fake_brew "$fake_bin"
+make_fake_docker "$docker_fake"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_DOCKER="$docker_fake" \
+  FAKE_DOCKER_PS='gitlab/gitlab-ce:19.5.0-ce.0\trunning\tlive\nregistry.example/gitlab/gitlab-ee:19.4.2-ee.0\texited\tstopped\ngitlab/gitlab-ce:latest\trunning\tunknown\ngitlab/gitlab-ee:19.5.1-ee.0\trunning\tfixed\ngitlab/gitlab-ce:18.10.8-ce.0\trunning\teol\n' \
+  FAKE_DOCKER_IMAGES='gitlab/gitlab-ce:19.5.0-ce.0\nregistry.example/gitlab/gitlab-ee:19.4.2-ee.0\ngitlab/gitlab-ce:latest\ngitlab/gitlab-ee:19.5.1-ee.0\ngitlab/gitlab-ce:18.10.8-ce.0\n'
+assert_contains '動いている古い GitLab は FAIL' "$case_dir/output.txt" 'FAIL  GitLab 19\.5\.0（gitlab/gitlab-ce:19\.5\.0-ce\.0）が動いています'
+assert_contains '止まっている古い GitLab は WARN' "$case_dir/output.txt" 'WARN  GitLab 19\.4\.2（registry\.example/gitlab/gitlab-ee:19\.4\.2-ee\.0）は修正版 19\.4\.3 より古い'
+assert_contains '動いている latest の GitLab は版不明の WARN' "$case_dir/output.txt" 'WARN  GitLab（gitlab/gitlab-ce:latest）は動いていますが版を判定できません'
+assert_not_contains '修正版以上の GitLab は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  GitLab 19\.5\.1（gitlab/gitlab-ee:19\.5\.1-ee\.0）'
+assert_contains '動いている修正版なしの古い GitLab 系列は FAIL' "$case_dir/output.txt" 'FAIL  GitLab 18\.10\.8（gitlab/gitlab-ce:18\.10\.8-ce\.0）が動いています。サポート終了の系列'
+
+case_dir="$TEST_TMP/gitlab-docker-info-fail"
+fake_bin="$case_dir/fake-bin"
+docker_fake="$fake_bin/docker"
+make_fake_brew "$fake_bin"
+make_fake_docker "$docker_fake"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_DOCKER="$docker_fake" FAKE_DOCKER_INFO_RC=1 \
+  FAKE_DOCKER_PS='gitlab/gitlab-ce:19.5.0-ce.0\trunning\tlive\n'
+assert_not_contains 'docker info 失敗時は GitLab の出力をしない' "$case_dir/output.txt" 'GitLab'
+
+case_dir="$TEST_TMP/gitlab-docker-absent"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_not_contains 'docker が無い時は GitLab の出力をしない' "$case_dir/output.txt" 'GitLab'
+
 case_dir="$TEST_TMP/tls-node"
 fake_bin="$case_dir/fake-bin"
 make_fake_brew "$fake_bin"
@@ -530,7 +686,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.3\.0 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.0 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"

@@ -452,10 +452,36 @@ check_git_size() {
   add_detail "$repo_name — .git ${mb}MB"
 }
 
+remote_host() {
+  local url="$1" host
+  case "$url" in
+    *://*) host="$(printf '%s' "$url" | sed -n 's#^[A-Za-z][A-Za-z0-9+.-]*://\([^/@]*@\)\{0,1\}\([^/:]*\).*#\2#p')" ;;
+    *@*:*) host="${url#*@}"; host="${host%%:*}" ;;
+    *) host="" ;;
+  esac
+  printf '%s' "$host" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cd 'a-z0-9._-'
+}
+
+note_self_managed_gitlab_origin() {
+  local origin_url="$1" host seen_file
+  host="$(remote_host "$origin_url")"
+  case "$host" in
+    ''|gitlab.com) return ;;
+    *gitlab*) ;;
+    *) return ;;
+  esac
+  seen_file="$TMP_DIR/gitlab-origin-hosts.seen"
+  if [ -f "$seen_file" ] && LC_ALL=C grep -Fqx "$host" "$seen_file" 2>/dev/null; then
+    return
+  fi
+  printf '%s\n' "$host" >> "$seen_file"
+  NOTES[${#NOTES[@]}]="${host} は自社で動かしている GitLab の可能性があります。サーバーの管理者に CVE-2026-110264 の修正版（19.5.1 など）を当てたか確かめてください"
+}
+
 check_repo() {
   local repo="$1" repo_name fetch branch state rebase_merge rebase_apply merge_head
   local ahead behind dirty stash fetch_days dirty_days stale_days upstream base unmerged
-  local ff_ok git_status_count
+  local ff_ok git_status_count origin_url
   repo_name="$(clean_text "$(basename -- "$repo")")"
 
   if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
@@ -464,22 +490,26 @@ check_repo() {
   fi
 
   fetch="OK"
-  if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+  origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$origin_url" ]; then
     fetch="NOREMOTE"
     add_warning "$repo_name — origin 未設定"
-  elif [ "$RH_SKIP_FETCH" = "1" ]; then
-    fetch="SKIP"
-    add_detail "$repo_name — fetch は RH_SKIP_FETCH=1 のため未検査"
-  elif run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
-    || { sleep 3; run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
-    streak_reset "fetch-$repo_name"
   else
-    fetch="NG"
-    fetch_days="$(streak_bump "fetch-$repo_name")"
-    if [ "$fetch_days" -ge "$RH_FETCH_FAIL_DAYS" ]; then
-      add_failure "$repo_name — fetch 失敗が${fetch_days}日連続（認証または remote を確認してください）"
+    note_self_managed_gitlab_origin "$origin_url"
+    if [ "$RH_SKIP_FETCH" = "1" ]; then
+      fetch="SKIP"
+      add_detail "$repo_name — fetch は RH_SKIP_FETCH=1 のため未検査"
+    elif run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
+      || { sleep 3; run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
+      streak_reset "fetch-$repo_name"
     else
-      add_warning "$repo_name — fetch 失敗（${fetch_days}日目。継続すると FAIL）"
+      fetch="NG"
+      fetch_days="$(streak_bump "fetch-$repo_name")"
+      if [ "$fetch_days" -ge "$RH_FETCH_FAIL_DAYS" ]; then
+        add_failure "$repo_name — fetch 失敗が${fetch_days}日連続（認証または remote を確認してください）"
+      else
+        add_warning "$repo_name — fetch 失敗（${fetch_days}日目。継続すると FAIL）"
+      fi
     fi
   fi
 
@@ -592,21 +622,24 @@ latest_version() {
 }
 
 version_less_than() {
-  local left="$1" right="$2" l1 l2 l3 r1 r2 r3
-  IFS=. read -r l1 l2 l3 <<EOF
+  local left="$1" right="$2" l1 l2 l3 l4 r1 r2 r3 r4
+  IFS=. read -r l1 l2 l3 l4 <<EOF
 $left
 EOF
-  IFS=. read -r r1 r2 r3 <<EOF
+  IFS=. read -r r1 r2 r3 r4 <<EOF
 $right
 EOF
-  l1=${l1:-0}; l2=${l2:-0}; l3=${l3:-0}
-  r1=${r1:-0}; r2=${r2:-0}; r3=${r3:-0}
-  is_uint "$l1" && is_uint "$l2" && is_uint "$l3" && is_uint "$r1" && is_uint "$r2" && is_uint "$r3" || return 1
+  l1=${l1:-0}; l2=${l2:-0}; l3=${l3:-0}; l4=${l4:-0}
+  r1=${r1:-0}; r2=${r2:-0}; r3=${r3:-0}; r4=${r4:-0}
+  is_uint "$l1" && is_uint "$l2" && is_uint "$l3" && is_uint "$l4" \
+    && is_uint "$r1" && is_uint "$r2" && is_uint "$r3" && is_uint "$r4" || return 1
   [ "$l1" -lt "$r1" ] && return 0
   [ "$l1" -gt "$r1" ] && return 1
   [ "$l2" -lt "$r2" ] && return 0
   [ "$l2" -gt "$r2" ] && return 1
-  [ "$l3" -lt "$r3" ]
+  [ "$l3" -lt "$r3" ] && return 0
+  [ "$l3" -gt "$r3" ] && return 1
+  [ "$l4" -lt "$r4" ]
 }
 
 update_cli() {
@@ -949,6 +982,219 @@ check_minimum_versions() {
   done < "$candidates"
 }
 
+check_java_versions() {
+  local candidates seen kegs home real release raw_version version display_version series
+  local row_component row_series row_minimum row_reason minimum reason wildcard_minimum wildcard_reason
+  local keg brew_prefix sdkman_dir remedy formula matched
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="Java の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  candidates="$TMP_DIR/java-candidates.list"
+  seen="$TMP_DIR/java-seen.list"
+  kegs="$TMP_DIR/java-kegs.list"
+  : > "$candidates"
+  : > "$seen"
+  : > "$kegs"
+
+  if [ -n "${RH_JAVA_CANDIDATES+x}" ]; then
+    printf '%s\n' "$RH_JAVA_CANDIDATES" >> "$candidates"
+  else
+    for home in /Library/Java/JavaVirtualMachines/*/Contents/Home "$HOME"/Library/Java/JavaVirtualMachines/*/Contents/Home; do
+      [ -d "$home" ] && printf '%s\n' "$home" >> "$candidates"
+    done
+    if command -v brew >/dev/null 2>&1; then
+      brew_prefix="$(brew --prefix 2>/dev/null || true)"
+      if [ -n "$brew_prefix" ]; then
+        home="$brew_prefix/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+        [ -d "$home" ] && printf '%s\n' "$home" >> "$candidates"
+        for home in "$brew_prefix"/opt/openjdk@*/libexec/openjdk.jdk/Contents/Home; do
+          [ -d "$home" ] && printf '%s\n' "$home" >> "$candidates"
+        done
+      fi
+    fi
+    sdkman_dir="$HOME/.sdkman/candidates/java"
+    for home in "$sdkman_dir"/*; do
+      [ -d "$home" ] || continue
+      [ "$(basename -- "$home")" = "current" ] && continue
+      printf '%s\n' "$home" >> "$candidates"
+    done
+  fi
+
+  while IFS= read -r home; do
+    [ -n "$home" ] && [ -d "$home" ] || continue
+    real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$home" 2>/dev/null || printf '%s' "$home")"
+    LC_ALL=C grep -Fqx "$real" "$seen" 2>/dev/null && continue
+    printf '%s\n' "$real" >> "$seen"
+    keg="$(printf '%s\n' "$real" | sed -n 's#^\(.*/Cellar/[^/][^/]*/[^/][^/]*\)/.*#\1#p')"
+    if [ -n "$keg" ]; then
+      LC_ALL=C grep -Fqx "$keg" "$kegs" 2>/dev/null && continue
+      printf '%s\n' "$keg" >> "$kegs"
+    fi
+
+    release="$home/release"
+    if [ ! -r "$release" ]; then
+      NOTES[${#NOTES[@]}]="java（${home}）— 版を判定できず未検査"
+      continue
+    fi
+    raw_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$release" 2>/dev/null | head -1)"
+    case "$raw_version" in
+      1.8.0_*) version="$(printf '%s' "$raw_version" | sed -n 's/^1\.8\.0_\([0-9][0-9]*\).*/8.0.\1/p')" ;;
+      *) version="$(printf '%s' "$raw_version" | LC_ALL=C grep -Eo '^[0-9]+(\.[0-9]+){0,3}' | head -1)" ;;
+    esac
+    if [ -z "$version" ]; then
+      NOTES[${#NOTES[@]}]="java（${home}）— 版を判定できず未検査"
+      continue
+    fi
+    series="${version%%.*}"
+    display_version="$version"
+    [ "$series" != "8" ] || display_version="8u${version##*.}"
+
+    minimum=""; reason=""; wildcard_minimum=""; wildcard_reason=""
+    while IFS=$'\t' read -r row_component row_series row_minimum row_reason; do
+      case "$row_component" in ''|\#*) continue;; esac
+      [ "$row_component" = "java" ] || continue
+      if [ "$row_series" = "$series" ]; then
+        minimum="$row_minimum"; reason="$row_reason"
+      elif [ "$row_series" = "*" ]; then
+        wildcard_minimum="$row_minimum"; wildcard_reason="$row_reason"
+      fi
+    done < "$SECURITY_MINIMUMS"
+    if [ -z "$minimum" ]; then
+      minimum="$wildcard_minimum"; reason="$wildcard_reason"
+    fi
+
+    matched="no"
+    if [ "$minimum" = "EOL" ]; then
+      matched="eol"
+    elif [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
+      matched="minimum"
+    fi
+    if [ "$matched" = "no" ]; then
+      security_detail "Java ${display_version}（${home}）— 最低版を満たしています"
+      continue
+    fi
+    if [ "$matched" = "eol" ]; then
+      add_warning "Java ${display_version}（${home}）はサポート終了の系列です（${reason}）。サポート中の系列（LTS の 17・21・25 など）へ移ってください。使っていなければ削除してください"
+      continue
+    fi
+
+    remedy="入れた方法（配布元のインストーラーや brew upgrade --cask）で最新版へ"
+    if [ -n "$keg" ]; then
+      formula="${keg%/*}"
+      formula="${formula##*/}"
+      remedy="brew upgrade ${formula}（Homebrew に修正版が出しだい）"
+    else
+      sdkman_dir="$HOME/.sdkman/candidates/java"
+      case "$home:$real" in
+        "$sdkman_dir"/*:*|*:"$sdkman_dir"/*) remedy="sdk install java で同じ系列の最新版へ" ;;
+        /Library/Java/JavaVirtualMachines/*:*|"$HOME"/Library/Java/JavaVirtualMachines/*:*)
+          remedy="入れた方法（配布元のインストーラーや brew upgrade --cask）で最新版へ"
+          ;;
+      esac
+    fi
+    add_warning "Java ${display_version}（${home}）は修正版 ${minimum} より古い版です（${reason}）。${remedy}"
+  done < "$candidates"
+}
+
+is_gitlab_image() {
+  case "$1" in
+    gitlab/gitlab-ce:*|gitlab/gitlab-ee:*|*/gitlab/gitlab-ce:*|*/gitlab/gitlab-ee:*|\
+    gitlab/gitlab-ce@*|gitlab/gitlab-ee@*|*/gitlab/gitlab-ce@*|*/gitlab/gitlab-ee@*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+check_gitlab_docker() {
+  local docker_cmd ps_output images_output records images image state _names running
+  local tag version series row_component row_series row_minimum row_reason minimum reason
+  local eol_threshold eol_reason eol_minimum matched remedy
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="GitLab の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  if [ -n "${RH_DOCKER+x}" ]; then
+    docker_cmd="$RH_DOCKER"
+  else
+    docker_cmd="$(command -v docker 2>/dev/null || true)"
+  fi
+  [ -n "$docker_cmd" ] && [ -x "$docker_cmd" ] || return
+  run_timeout 20 "$docker_cmd" info >/dev/null 2>&1 || return
+  ps_output="$(run_timeout 20 "$docker_cmd" ps -a --format '{{.Image}}\t{{.State}}\t{{.Names}}' 2>/dev/null || true)"
+  images_output="$(run_timeout 20 "$docker_cmd" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)"
+  records="$TMP_DIR/gitlab-docker-records.tsv"
+  images="$TMP_DIR/gitlab-docker-images.list"
+  : > "$records"
+  while IFS=$'\t' read -r image state _names; do
+    is_gitlab_image "$image" || continue
+    if [ "$state" = "running" ]; then
+      printf '%s\trunning\n' "$image" >> "$records"
+    else
+      printf '%s\tstopped\n' "$image" >> "$records"
+    fi
+  done <<EOF
+$ps_output
+EOF
+  while IFS= read -r image; do
+    is_gitlab_image "$image" || continue
+    printf '%s\timage\n' "$image" >> "$records"
+  done <<EOF
+$images_output
+EOF
+  [ -s "$records" ] || return
+  cut -f1 "$records" | LC_ALL=C sort -u > "$images"
+
+  while IFS= read -r image; do
+    running="no"
+    if awk -F '\t' -v image="$image" '$1 == image && $2 == "running" { found=1 } END { exit !found }' "$records"; then
+      running="yes"
+    fi
+    tag="${image##*:}"
+    version="$(printf '%s' "$tag" | LC_ALL=C grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -z "$version" ]; then
+      if [ "$running" = "yes" ]; then
+        add_warning "GitLab（${image}）は動いていますが版を判定できません。GitLab の管理画面（/help）で版を確かめ、19.5.1 などの修正版以上か確認してください"
+      else
+        NOTES[${#NOTES[@]}]="GitLab（${image}）— 版を判定できず未検査"
+      fi
+      continue
+    fi
+
+    series="${version%.*}"
+    minimum=""; reason=""; eol_threshold=""; eol_reason=""; eol_minimum=""
+    while IFS=$'\t' read -r row_component row_series row_minimum row_reason; do
+      case "$row_component" in ''|\#*) continue;; esac
+      [ "$row_component" = "gitlab" ] || continue
+      if [ "$row_series" = "$series" ]; then
+        minimum="$row_minimum"; reason="$row_reason"
+      elif [ "$row_series" = "EOL" ]; then
+        eol_threshold="$row_minimum"; eol_reason="$row_reason"
+      elif [ "$row_series" = "18.11" ]; then
+        eol_minimum="$row_minimum"
+      fi
+    done < "$SECURITY_MINIMUMS"
+    matched="no"
+    if [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
+      matched="minimum"
+    elif [ -n "$eol_threshold" ] && version_less_than "$version" "$eol_threshold"; then
+      matched="eol"; reason="$eol_reason"; minimum="$eol_minimum"
+    fi
+    [ "$matched" != "no" ] || continue
+    remedy="GitLab の更新手順（https://docs.gitlab.com/update/ ）で ${minimum} 以上へ。単一サーバー構成では更新中に止まります"
+    if [ "$matched" = "eol" ]; then
+      if [ "$running" = "yes" ]; then
+        add_failure "GitLab ${version}（${image}）が動いています。サポート終了の系列です（${reason}）。${remedy}"
+      else
+        add_warning "GitLab ${version}（${image}）はサポート終了の系列です（${reason}）。${remedy}"
+      fi
+    elif [ "$running" = "yes" ]; then
+      add_failure "GitLab ${version}（${image}）が動いています。修正版 ${minimum} より古い版です（${reason}）。${remedy}"
+    else
+      add_warning "GitLab ${version}（${image}）は修正版 ${minimum} より古い版です（${reason}）。${remedy}"
+    fi
+  done < "$images"
+}
+
 tls_probe_once() {
   local kind="$1" path="$2" url="$3" rc
   case "$kind" in
@@ -1146,6 +1392,8 @@ check_mac_security() {
   check_brew_security
   check_minimum_versions php
   check_minimum_versions node
+  check_java_versions
+  check_gitlab_docker
   check_tls_security
   check_software_updates
   check_kit_update
