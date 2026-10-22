@@ -126,6 +126,7 @@ DENY_SCANNER="${RH_DENY_SCANNER:-$SCRIPT_DIR/pkg-denylist-scan.py}"
 VULN_ALLOW_FILE="${RH_VULN_ALLOW_FILE:-$HOME/.config/repo-health-kit/vuln-allow.tsv}"
 SECURITY_PACKAGES="${RH_SECURITY_PACKAGES:-$KIT_DIR/config/security-packages.txt}"
 SECURITY_MINIMUMS="${RH_SECURITY_MINIMUMS:-$KIT_DIR/config/security-minimums.tsv}"
+PYTHON_PINS="${RH_PYTHON_PINS:-$KIT_DIR/config/python-pins.tsv}"
 ACTIONS_DENYLIST="${RH_ACTIONS_DENYLIST:-$KIT_DIR/config/actions-denylist.tsv}"
 TLS_PROBES="${RH_TLS_PROBES:-$KIT_DIR/config/tls-probes.tsv}"
 
@@ -1451,6 +1452,313 @@ check_java_versions() {
   done < "$candidates"
 }
 
+python_version_from_site() {
+  local site="$1" version
+  version="$(printf '%s\n' "$site" | sed -n 's#.*[/]lib/python\([0-9][0-9]*\.[0-9][0-9]*\)t*/site-packages.*#\1#p' | head -1)"
+  if [ -z "$version" ]; then
+    version="$(printf '%s\n' "$site" | sed -n 's#.*[/]Versions/\([0-9][0-9]*\.[0-9][0-9]*\).*#\1#p' | head -1)"
+  fi
+  if [ -z "$version" ]; then
+    version="$(printf '%s\n' "$site" | sed -n 's#.*[/]Library/Python/\([0-9][0-9]*\.[0-9][0-9]*\)/.*#\1#p' | head -1)"
+  fi
+  printf '%s\n' "$version"
+}
+
+python_package_version() {
+  local init_file="$1" raw
+  [ -r "$init_file" ] || return
+  raw="$(sed -n "s/^[[:space:]]*__version__[[:space:]]*=[[:space:]]*['\"]\\([^'\"]*\\)['\"].*/\\1/p" "$init_file" 2>/dev/null | head -1)"
+  leading_version "$raw"
+}
+
+python_pin_url() {
+  local wanted="$1" component _version url
+  [ -f "$PYTHON_PINS" ] || return
+  while IFS=$'\t' read -r component _version url; do
+    case "$component" in ''|\#*) continue;; esac
+    if [ "$component" = "$wanted" ]; then
+      printf '%s\n' "$url"
+      return
+    fi
+  done < "$PYTHON_PINS"
+}
+
+add_python_site_candidate() {
+  local candidates="$1" kind="$2" site="$3" python="$4" label="${5:-$3}"
+  [ -d "$site" ] || return
+  printf '%s\t%s\t%s\t%s\n' "$kind" "$site" "$python" "$label" >> "$candidates"
+}
+
+check_python_packages() {
+  local candidates seen formula_kegs uv_candidates uv_seen brew_cmd brew_prefix site version_root
+  local pyenv_root pipx_root conda_root repo cfg venv relative repo_name kind python label real py_version
+  local pip_version certifi_version uv_version metadata metadata_version pip_min pip_reason cert_min cert_reason
+  local uv_min uv_reason pip_old cert_old uv_old pip_pin cert_pin python_name fallback user_flag
+  local pip_remedy cert_remedy cert_real cert_keg uv_raw uv_real uv_output uv_root
+
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="Python の pip・certifi の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+
+  candidates="$TMP_DIR/python-sites.tsv"
+  seen="$TMP_DIR/python-sites-seen.list"
+  formula_kegs="$TMP_DIR/python-certifi-kegs.list"
+  : > "$candidates"
+  : > "$seen"
+  : > "$formula_kegs"
+
+  if [ -n "${RH_PYTHON_SITE_DIRS+x}" ]; then
+    printf '%s\n' "$RH_PYTHON_SITE_DIRS" >> "$candidates"
+  else
+    if [ -n "${RH_BREW+x}" ]; then brew_cmd="$RH_BREW"; else brew_cmd="$(command -v brew 2>/dev/null || true)"; fi
+    if [ -n "$brew_cmd" ] && [ -x "$brew_cmd" ]; then
+      brew_prefix="$("$brew_cmd" --prefix 2>/dev/null || true)"
+      if [ -n "$brew_prefix" ]; then
+        for site in "$brew_prefix"/lib/python3.*/site-packages; do
+          [ -d "$site" ] || continue
+          # lib/python3.15t のような free-threaded 版は、呼び出し名も python3.15t
+          python_name="${site%/site-packages}"
+          python_name="${python_name##*/}"
+          add_python_site_candidate "$candidates" brew "$site" "$brew_prefix/bin/${python_name}" "$site"
+        done
+      fi
+    fi
+    for site in /Library/Frameworks/Python.framework/Versions/*/lib/python3.*/site-packages; do
+      [ -d "$site" ] || continue
+      version_root="${site%%/lib/python*}"
+      py_version="$(python_version_from_site "$site")"
+      add_python_site_candidate "$candidates" python.org "$site" "$version_root/bin/python${py_version}" "$site"
+    done
+    for site in /Library/Frameworks/PythonT.framework/Versions/*/lib/python3.*/site-packages; do
+      [ -d "$site" ] || continue
+      version_root="${site%%/lib/python*}"
+      py_version="$(python_version_from_site "$site")"
+      add_python_site_candidate "$candidates" python.org "$site" "$version_root/bin/python${py_version}t" "$site"
+    done
+    for site in "$HOME"/Library/Python/*/lib/python/site-packages; do
+      [ -d "$site" ] || continue
+      py_version="$(python_version_from_site "$site")"
+      if [ "$py_version" = "3.9" ]; then
+        python=/usr/bin/python3
+      else
+        python="$(command -v "python${py_version}" 2>/dev/null || printf 'python%s' "$py_version")"
+      fi
+      add_python_site_candidate "$candidates" user "$site" "$python" "$site"
+    done
+    pyenv_root="${PYENV_ROOT:-$HOME/.pyenv}"
+    for site in "$pyenv_root"/versions/*/lib/python3.*/site-packages; do
+      [ -d "$site" ] || continue
+      version_root="${site%%/lib/python*}"
+      add_python_site_candidate "$candidates" pyenv "$site" "$version_root/bin/python" "$site"
+    done
+    for site in "$HOME"/.local/share/uv/python/*/lib/python3.*/site-packages; do
+      [ -d "$site" ] || continue
+      version_root="${site%%/lib/python*}"
+      add_python_site_candidate "$candidates" uv-python "$site" "$version_root/bin/python3" "$site"
+    done
+    for pipx_root in "$HOME/.local/pipx" "$HOME/.local/share/pipx"; do
+      for site in "$pipx_root"/venvs/*/lib/python3.*/site-packages; do
+        [ -d "$site" ] || continue
+        version_root="${site%%/lib/python*}"
+        add_python_site_candidate "$candidates" pipx "$site" "$version_root/bin/python" "$site"
+      done
+    done
+    for conda_root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3"; do
+      for site in "$conda_root"/lib/python3.*/site-packages "$conda_root"/envs/*/lib/python3.*/site-packages; do
+        [ -d "$site" ] || continue
+        version_root="${site%%/lib/python*}"
+        add_python_site_candidate "$candidates" conda "$site" "$version_root/bin/python" "$site"
+      done
+    done
+    for site in /Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/lib/python3.*/site-packages \
+      /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/lib/python3.*/site-packages; do
+      [ -d "$site" ] || continue
+      add_python_site_candidate "$candidates" apple "$site" /usr/bin/python3 "$site"
+    done
+  fi
+
+  while IFS= read -r -d '' repo; do
+    [ -e "$repo/.git" ] || continue
+    while IFS= read -r -d '' cfg; do
+      venv="${cfg%/pyvenv.cfg}"
+      relative="${venv#"$repo"/}"
+      repo_name="$(basename -- "$repo")"
+      for site in "$venv"/lib/python3.*/site-packages; do
+        [ -d "$site" ] || continue
+        add_python_site_candidate "$candidates" venv "$site" "$venv/bin/python" "${repo_name}/${relative}"
+      done
+    done < <(find "$repo" -maxdepth 3 \( -name .git -o -name node_modules \) -prune -o -type f -name pyvenv.cfg -print0 2>/dev/null)
+  done < "$REPO_LIST"
+
+  while IFS=$'\t' read -r kind site python label; do
+    [ -n "$kind" ] && [ -d "$site" ] || continue
+    case "$kind" in brew|python.org|user|pyenv|uv-python|pipx|conda|venv|apple) ;; *) continue;; esac
+    real="$(real_path_of "$site")"
+    LC_ALL=C grep -Fqx "$real" "$seen" 2>/dev/null && continue
+    printf '%s\n' "$real" >> "$seen"
+    [ -n "$label" ] || label="$site"
+    py_version="$(python_version_from_site "$site")"
+    pip_version="$(python_package_version "$site/pip/__init__.py" || true)"
+    certifi_version="$(python_package_version "$site/certifi/__init__.py" || true)"
+    uv_version=""
+    for metadata in "$site"/uv-*.dist-info/METADATA; do
+      [ -r "$metadata" ] || continue
+      metadata_version="$(sed -n 's/^Version:[[:space:]]*//p' "$metadata" 2>/dev/null | head -1)"
+      metadata_version="$(leading_version "$metadata_version")"
+      [ -n "$metadata_version" ] || continue
+      if [ -z "$uv_version" ] || version_less_than "$uv_version" "$metadata_version"; then
+        uv_version="$metadata_version"
+      fi
+    done
+
+    pip_min=""; pip_reason=""; cert_min=""; cert_reason=""; uv_min=""; uv_reason=""
+    if [ -n "$pip_version" ]; then
+      lookup_minimum_row pip "$pip_version"; pip_min="$MIN_ROW_MINIMUM"; pip_reason="$MIN_ROW_REASON"
+    fi
+    if [ -n "$certifi_version" ]; then
+      lookup_minimum_row certifi "$certifi_version"; cert_min="$MIN_ROW_MINIMUM"; cert_reason="$MIN_ROW_REASON"
+    fi
+    if [ -n "$uv_version" ]; then
+      lookup_minimum_row uv "$uv_version"; uv_min="$MIN_ROW_MINIMUM"; uv_reason="$MIN_ROW_REASON"
+    fi
+    pip_old=0; cert_old=0; uv_old=0
+    [ -z "$pip_min" ] || ! version_less_than "$pip_version" "$pip_min" || pip_old=1
+    [ -z "$cert_min" ] || ! version_less_than "$certifi_version" "$cert_min" || cert_old=1
+    [ -z "$uv_min" ] || ! version_less_than "$uv_version" "$uv_min" || uv_old=1
+
+    if [ "$kind" = "apple" ]; then
+      if [ "$pip_old" -eq 1 ]; then
+        NOTES[${#NOTES[@]}]="Apple の python3（${label}）の pip ${pip_version} は古い版です（Apple の更新待ち）。/usr/bin/python3 -m pip でネットからパッケージを入れないでください"
+      elif [ "$cert_old" -eq 1 ]; then
+        NOTES[${#NOTES[@]}]="Apple の python3（${label}）の certifi ${certifi_version} は古い版です（Apple の更新待ち）。/usr/bin/python3 -m pip でネットからパッケージを入れないでください"
+      fi
+      continue
+    fi
+
+    if [ -n "$pip_version" ] && [ "$pip_old" -eq 0 ]; then
+      security_detail "Python（${label}）の pip ${pip_version} — 最低版 ${pip_min} 以上"
+    fi
+    if [ -n "$certifi_version" ] && [ "$cert_old" -eq 0 ]; then
+      security_detail "Python（${label}）の certifi ${certifi_version} — 最低版 ${cert_min} 以上"
+    fi
+    if [ -n "$uv_version" ] && [ "$uv_old" -eq 0 ]; then
+      security_detail "Python（${label}）の uv ${uv_version} — 最低版 ${uv_min} 以上"
+    fi
+
+    if [ "$pip_old" -eq 1 ] && [ -n "$py_version" ] && version_less_than "$py_version" 3.10; then
+      NOTES[${#NOTES[@]}]="Python ${py_version}（${label}）の pip ${pip_version} は修正版 ${pip_min} を入れられません（Python 3.10 以上が必要）。この pip でネットからパッケージを入れないでください"
+      pip_old=0
+    fi
+
+    python_name="$python"
+    [ -x "$python" ] || python_name="この環境の python"
+    pip_pin="$(python_pin_url pip || true)"
+    cert_pin="$(python_pin_url certifi || true)"
+    fallback="\"${python_name}\" -m pip install --upgrade pip certifi（Python 公式の告知にある sha256 付きの入れ方が安全です）"
+    user_flag=""
+    [ "$kind" != "user" ] || user_flag="--user "
+
+    cert_keg=""
+    # Homebrew は certifi のフォルダーごとではなく中のファイルごとに symlink を張ることがあるので、__init__.py の実体で見る
+    if [ "$cert_old" -eq 1 ] && [ -e "$site/certifi/__init__.py" ]; then
+      cert_real="$(real_path_of "$site/certifi/__init__.py")"
+      cert_keg="$(printf '%s\n' "$cert_real" | sed -n 's#^\(.*/Cellar/certifi/[^/][^/]*\)/.*#\1#p')"
+      if [ -n "$cert_keg" ] && LC_ALL=C grep -Fqx "$cert_keg" "$formula_kegs" 2>/dev/null; then
+        cert_old=0
+      fi
+    fi
+
+    pip_remedy=""
+    if [ "$pip_old" -eq 1 ]; then
+      if [ -z "$pip_pin" ]; then
+        pip_remedy="$fallback"
+      else
+        pip_remedy="\"${python_name}\" -m pip install \"pip @ ${pip_pin}\""
+        if [ "$kind" = "brew" ] && [ -n "$py_version" ]; then
+          pip_remedy="brew upgrade python@${py_version}。まだ古ければ ${pip_remedy}"
+        fi
+      fi
+    fi
+    cert_remedy=""
+    if [ "$cert_old" -eq 1 ]; then
+      if [ -n "$cert_keg" ]; then
+        cert_remedy="brew upgrade certifi"
+      elif [ -z "$cert_pin" ]; then
+        cert_remedy="$fallback"
+      else
+        cert_remedy="\"${python_name}\" -m pip install ${user_flag}\"certifi @ ${cert_pin}\""
+      fi
+    fi
+
+    if [ "$pip_old" -eq 1 ] && [ "$cert_old" -eq 1 ]; then
+      if [ "$pip_remedy" = "$fallback" ] || [ "$cert_remedy" = "$fallback" ]; then
+        add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${fallback}"
+      else
+        add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${pip_remedy} → ${cert_remedy}"
+      fi
+    elif [ "$pip_old" -eq 1 ]; then
+      add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）。直し方: ${pip_remedy}"
+    elif [ "$cert_old" -eq 1 ]; then
+      add_warning "Python（${label}）の certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${cert_remedy}"
+    fi
+    if [ "$cert_old" -eq 1 ] && [ -n "$cert_keg" ]; then
+      printf '%s\n' "$cert_keg" >> "$formula_kegs"
+    fi
+    if [ "$uv_old" -eq 1 ]; then
+      add_warning "Python（${label}）の uv ${uv_version} は修正版 ${uv_min} より古い版です（${uv_reason}）。pip を先に直してから、直し方: \"${python_name}\" -m pip install --upgrade uv"
+    fi
+  done < "$candidates"
+
+  uv_candidates="$TMP_DIR/uv-candidates.list"
+  uv_seen="$TMP_DIR/uv-seen.list"
+  : > "$uv_candidates"
+  : > "$uv_seen"
+  if [ -n "${RH_UV_CANDIDATES+x}" ]; then
+    printf '%s\n' "$RH_UV_CANDIDATES" >> "$uv_candidates"
+  else
+    type -aP uv 2>/dev/null >> "$uv_candidates" || true
+    [ -x "$HOME/.local/bin/uv" ] && printf '%s\n' "$HOME/.local/bin/uv" >> "$uv_candidates"
+    [ -x "$HOME/.cargo/bin/uv" ] && printf '%s\n' "$HOME/.cargo/bin/uv" >> "$uv_candidates"
+  fi
+  while IFS= read -r uv_raw; do
+    [ -n "$uv_raw" ] && [ -x "$uv_raw" ] || continue
+    uv_real="$(real_path_of "$uv_raw")"
+    LC_ALL=C grep -Fqx "$uv_real" "$uv_seen" 2>/dev/null && continue
+    printf '%s\n' "$uv_real" >> "$uv_seen"
+    uv_output="$(run_timeout 20 "$uv_raw" --version 2>/dev/null | head -1 || true)"
+    uv_version="$(printf '%s\n' "$uv_output" | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -z "$uv_version" ]; then
+      NOTES[${#NOTES[@]}]="uv（${uv_raw}）— 版を判定できず未検査"
+      continue
+    fi
+    lookup_minimum_row uv "$uv_version"
+    uv_min="$MIN_ROW_MINIMUM"; uv_reason="$MIN_ROW_REASON"
+    if [ -z "$uv_min" ] || ! version_less_than "$uv_version" "$uv_min"; then
+      security_detail "uv ${uv_version}（${uv_raw}）— 最低版 ${uv_min} 以上"
+      continue
+    fi
+    uv_root="${uv_raw%/bin/uv}"
+    if [ -f "$uv_root/pyvenv.cfg" ]; then
+      security_detail "uv ${uv_version}（${uv_raw}）— venv の site-packages 側で判定"
+      continue
+    fi
+    uv_root="${uv_real%/bin/uv}"
+    if [ -f "$uv_root/pyvenv.cfg" ]; then
+      security_detail "uv ${uv_version}（${uv_raw}）— venv の site-packages 側で判定"
+    elif printf '%s\n' "$uv_real" | LC_ALL=C grep -q '/Cellar/uv/'; then
+      add_warning "uv ${uv_version}（${uv_raw}）は修正版 ${uv_min} より古い版です（${uv_reason}）。直し方: brew upgrade uv"
+    else
+      case "$uv_raw" in
+        "$HOME/.local/bin/uv"|"$HOME/.cargo/bin/uv")
+          add_warning "uv ${uv_version}（${uv_raw}）は修正版 ${uv_min} より古い版です（${uv_reason}）。直し方: uv self update"
+          ;;
+        *) add_warning "uv ${uv_version}（${uv_raw}）は修正版 ${uv_min} より古い版です（${uv_reason}）。入れた方法で更新してください" ;;
+      esac
+    fi
+  done < "$uv_candidates"
+}
+
 is_gitlab_image() {
   case "$1" in
     gitlab/gitlab-ce:*|gitlab/gitlab-ee:*|*/gitlab/gitlab-ce:*|*/gitlab/gitlab-ee:*|\
@@ -1758,6 +2066,7 @@ check_mac_security() {
   check_minimum_versions php
   check_minimum_versions node
   check_java_versions
+  check_python_packages
   check_gitlab_docker
   check_macos_minimum
   check_claude_minimum

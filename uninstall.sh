@@ -15,6 +15,7 @@ rm -f "$INSTALL_DIR/bin/repo-health.sh" "$INSTALL_DIR/bin/pkg-denylist-scan.py"
 rm -f "$INSTALL_DIR/VERSION"
 rm -f "$INSTALL_DIR/config/pkg-denylist.tsv" "$INSTALL_DIR/config/security-packages.txt"
 rm -f "$INSTALL_DIR/config/security-minimums.tsv" "$INSTALL_DIR/config/tls-probes.tsv"
+rm -f "$INSTALL_DIR/config/python-pins.tsv"
 rm -f "$INSTALL_DIR/config/actions-denylist.tsv"
 rmdir "$INSTALL_DIR/bin" "$INSTALL_DIR/config" 2>/dev/null || true
 rmdir "$INSTALL_DIR" 2>/dev/null || true

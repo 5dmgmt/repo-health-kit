@@ -28,6 +28,12 @@ assert_not_contains() {
   if LC_ALL=C grep -qE "$pattern" "$file"; then fail "$description"; sed -n '1,120p' "$file"; else pass "$description"; fi
 }
 
+assert_count() {
+  local description="$1" file="$2" pattern="$3" expected="$4" actual
+  actual="$(LC_ALL=C grep -cE "$pattern" "$file" || true)"
+  if [ "$actual" = "$expected" ]; then pass "$description"; else fail "$description"; sed -n '1,160p' "$file"; fi
+}
+
 make_remote_repo() {
   local case_dir="$1" name="$2" root bare
   root="$case_dir/root with space"
@@ -70,6 +76,7 @@ run_security() {
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
     RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
+    RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= \
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
@@ -122,6 +129,23 @@ make_fake_java_home() {
   printf 'JAVA_VERSION="%s"\n' "$version" > "$home/release"
 }
 
+make_python_site() {
+  local site="$1" pip_version="$2" certifi_version="$3"
+  mkdir -p "$site/pip" "$site/certifi"
+  printf '__version__ = "%s"\n' "$pip_version" > "$site/pip/__init__.py"
+  printf '__version__ = "%s"\n' "$certifi_version" > "$site/certifi/__init__.py"
+}
+
+make_fake_uv() {
+  local path="$1" version="$2"
+  mkdir -p "${path%/*}"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf 'printf "uv %s\\n"\n' "$version"
+  } > "$path"
+  chmod +x "$path"
+}
+
 make_fake_docker() {
   local path="$1"
   {
@@ -150,6 +174,7 @@ make_fake_lsof() {
 
 make_exit_command() {
   local path="$1" rc="$2"
+  mkdir -p "${path%/*}"
   {
     printf '%s\n' '#!/bin/bash'
     printf 'exit %s\n' "$rc"
@@ -168,7 +193,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..149\n'
+printf '1..171\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -286,6 +311,7 @@ installed_assets=0
 if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/VERSION" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-packages.txt" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-minimums.tsv" ] \
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/python-pins.tsv" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/tls-probes.tsv" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/actions-denylist.tsv" ]; then
   installed_assets=1
@@ -293,7 +319,8 @@ fi
 HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
 uninstall_rc=$?
 if [ "$install_rc" -eq 0 ] && [ "$uninstall_rc" -eq 0 ] \
-  && [ ! -e "$case_dir/home/Library/LaunchAgents/com.repo-health-kit.plist" ]; then
+  && [ ! -e "$case_dir/home/Library/LaunchAgents/com.repo-health-kit.plist" ] \
+  && [ ! -e "$case_dir/home/Library/Application Support/repo-health-kit/config/python-pins.tsv" ]; then
   pass '一時 HOME で install と uninstall が完了する'
 else
   fail '一時 HOME で install と uninstall が完了する'
@@ -562,6 +589,180 @@ assert_contains '11.0.32 は 11.0.32.1 より古い' "$case_dir/old/output.txt" 
 run_security "$case_dir/fixed" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_MINIMUMS="$minimums" RH_JAVA_CANDIDATES="$java_fixed"
 assert_not_contains '11.0.32.1 は同じ4桁の最低版を満たす' "$case_dir/fixed/output.txt" '(WARN|FAIL)  Java 11\.0\.32\.1（'
 
+case_dir="$TEST_TMP/python-venv-old"
+fake_bin="$case_dir/fake-bin"
+repo="$case_dir/root/fixture"
+venv="$repo/.venv"
+site="$venv/lib/python3.14/site-packages"
+marker="$case_dir/python-executed"
+make_fake_brew "$fake_bin"
+mkdir -p "$repo/.git" "$venv/bin"
+printf 'home = /fixture\n' > "$venv/pyvenv.cfg"
+make_python_site "$site" 26.2.1 2026.7.22
+{
+  printf '%s\n' '#!/bin/bash'
+  printf 'printf executed > "%s"\n' "$marker"
+} > "$venv/bin/python"
+chmod +x "$venv/bin/python"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_count '同じ venv の古い pip と certifi は WARN 1件にまとめる' "$case_dir/output.txt" 'WARN  Python（fixture/\.venv）' 1
+assert_contains 'venv の WARN はその venv の python を案内する' "$case_dir/output.txt" "$venv/bin/python"
+assert_contains 'venv の WARN は sha256 付き pip URL を案内する' "$case_dir/output.txt" 'pip-26\.2\.2-py3-none-any\.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70'
+assert_contains 'venv の WARN は sha256 付き certifi URL を案内する' "$case_dir/output.txt" 'certifi-2026\.10\.19-py3-none-any\.whl#sha256=42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b'
+if [ ! -e "$marker" ]; then pass '点検対象の venv の python は実行しない'; else fail '点検対象の venv の python は実行しない'; fi
+
+case_dir="$TEST_TMP/python-venv-fixed"
+fake_bin="$case_dir/fake-bin"
+repo="$case_dir/root/fixture"
+venv="$repo/.venv"
+site="$venv/lib/python3.14/site-packages"
+make_fake_brew "$fake_bin"
+mkdir -p "$repo/.git" "$venv/bin"
+printf 'home = /fixture\n' > "$venv/pyvenv.cfg"
+make_python_site "$site" 26.2.2 2026.10.19
+make_exit_command "$venv/bin/python" 0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_not_contains '修正版の venv は Python の WARN を出さない' "$case_dir/output.txt" '^WARN  Python（fixture/\.venv）'
+assert_contains '修正版の pip は最低版以上の detail を出す' "$case_dir/output.txt" 'Python（fixture/\.venv）の pip 26\.2\.2 — 最低版 26\.2\.2 以上'
+
+case_dir="$TEST_TMP/python-dist-info-remnant"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/Library/Python/3.14/lib/python/site-packages"
+python="$case_dir/python3.14"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 26.2.2 2026.10.19
+mkdir -p "$site/certifi-2026.2.25.dist-info"
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'user\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains '古い certifi dist-info の残骸では WARN にしない' "$case_dir/output.txt" '^WARN  Python（.*python-dist-info-remnant'
+
+case_dir="$TEST_TMP/python-user-39"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/home/Library/Python/3.9/lib/python/site-packages"
+python="$case_dir/python3"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 21.2.4 2026.1.4
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'user\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains 'Python 3.9 の古い pip は更新不能の NOTES' "$case_dir/output.txt" 'Python 3\.9（.*）の pip 21\.2\.4 は修正版 26\.2\.2 を入れられません（Python 3\.10 以上が必要）'
+assert_contains 'user site の古い certifi は --user 付きの WARN' "$case_dir/output.txt" 'WARN  Python（.*）の certifi 2026\.1\.4.*-m pip install --user "certifi @'
+
+case_dir="$TEST_TMP/python-apple"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/site-packages"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 21.2.4 2026.1.4
+: > "$case_dir/brew.log"
+python_sites="$(printf 'apple\t%s\t/usr/bin/python3' "$site")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains 'Apple 管理の Python は WARN にしない' "$case_dir/output.txt" '^WARN  (Python|Apple)'
+assert_count 'Apple 管理の Python は場所ごとに NOTES 1件' "$case_dir/output.txt" 'Apple の python3（.*）の pip 21\.2\.4 は古い版です' 1
+
+case_dir="$TEST_TMP/python-certifi-formula"
+fake_bin="$case_dir/fake-bin"
+keg_site="$case_dir/Cellar/certifi/2026.2.25/lib/python3.14/site-packages"
+site13="$case_dir/homebrew/lib/python3.13/site-packages"
+site14="$case_dir/homebrew/lib/python3.14/site-packages"
+python="$case_dir/homebrew/bin/python3.14"
+make_fake_brew "$fake_bin"
+mkdir -p "$keg_site/certifi" "$site13" "$site14/certifi" "${python%/*}"
+printf '__version__ = "2026.2.25"\n' > "$keg_site/certifi/__init__.py"
+# 3.13 はフォルダーごと、3.14 は実機の Homebrew と同じく中のファイルごとに symlink
+ln -s "$keg_site/certifi" "$site13/certifi"
+ln -s "$keg_site/certifi/__init__.py" "$site14/certifi/__init__.py"
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew\t%s\t%s\nbrew\t%s\t%s' "$site13" "$python" "$site14" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_count 'Homebrew certifi formula は keg ごとに WARN 1件' "$case_dir/output.txt" 'WARN  Python（.*）の certifi 2026\.2\.25' 1
+assert_contains 'Homebrew certifi formula は brew upgrade certifi を案内する' "$case_dir/output.txt" '直し方: brew upgrade certifi'
+
+case_dir="$TEST_TMP/python-pins-missing"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 26.2.1 2026.7.22
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_PYTHON_SITE_DIRS="$python_sites" RH_PYTHON_PINS="$case_dir/missing-python-pins.tsv"
+assert_contains 'pins 表が無いときは通常更新と sha256 の注意を案内する' "$case_dir/output.txt" 'pip install --upgrade pip certifi（Python 公式の告知にある sha256 付きの入れ方が安全です）'
+
+case_dir="$TEST_TMP/python-site-uv"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+mkdir -p "$site/uv-0.13.3.dist-info"
+printf 'Metadata-Version: 2.4\nVersion: 0.13.3\n' > "$site/uv-0.13.3.dist-info/METADATA"
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains 'site-packages の古い uv は pip を先に直す WARN' "$case_dir/output.txt" 'WARN  Python（.*）の uv 0\.13\.3 は修正版 0\.13\.4 より古い版です.*pip を先に直してから'
+
+case_dir="$TEST_TMP/uv-local-old"
+fake_bin="$case_dir/fake-bin"
+uv_path="$case_dir/home/.local/bin/uv"
+make_fake_brew "$fake_bin"
+make_fake_uv "$uv_path" 0.13.3
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_UV_CANDIDATES="$uv_path"
+assert_contains '古い user uv は uv self update を案内する' "$case_dir/output.txt" 'WARN  uv 0\.13\.3（.*\.local/bin/uv）は修正版 0\.13\.4 より古い版です.*uv self update'
+
+case_dir="$TEST_TMP/uv-local-fixed"
+fake_bin="$case_dir/fake-bin"
+uv_path="$case_dir/home/.local/bin/uv"
+make_fake_brew "$fake_bin"
+make_fake_uv "$uv_path" 0.13.5
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_UV_CANDIDATES="$uv_path"
+assert_not_contains '修正版以上の uv CLI は WARN を出さない' "$case_dir/output.txt" '^WARN  uv '
+
+case_dir="$TEST_TMP/uv-cellar-old"
+fake_bin="$case_dir/fake-bin"
+uv_path="$case_dir/Cellar/uv/0.13.3/bin/uv"
+make_fake_brew "$fake_bin"
+make_fake_uv "$uv_path" 0.13.3
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_UV_CANDIDATES="$uv_path"
+assert_contains 'Homebrew の古い uv は brew upgrade uv を案内する' "$case_dir/output.txt" 'WARN  uv 0\.13\.3（.*）は修正版 0\.13\.4 より古い版です.*brew upgrade uv'
+
+case_dir="$TEST_TMP/uv-venv-old"
+fake_bin="$case_dir/fake-bin"
+uv_path="$case_dir/tool-venv/bin/uv"
+make_fake_brew "$fake_bin"
+make_fake_uv "$uv_path" 0.13.3
+printf 'home = /fixture\n' > "$case_dir/tool-venv/pyvenv.cfg"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_UV_CANDIDATES="$uv_path"
+assert_not_contains 'venv の uv CLI は二重 WARN を出さない' "$case_dir/output.txt" '^WARN  uv '
+
+case_dir="$TEST_TMP/uv-unknown"
+fake_bin="$case_dir/fake-bin"
+uv_path="$case_dir/bin/uv"
+make_fake_brew "$fake_bin"
+make_fake_uv "$uv_path" unknown
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_UV_CANDIDATES="$uv_path"
+assert_contains '版を返さない uv は未検査の NOTES' "$case_dir/output.txt" 'uv（.*bin/uv）— 版を判定できず未検査'
+
+case_dir="$TEST_TMP/python-minimums-missing"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_MINIMUMS="$case_dir/missing-minimums.tsv"
+assert_contains '最低版表が無いときは Python 点検不足の NOTES' "$case_dir/output.txt" 'Python の pip・certifi の最低版は同梱リスト不足のため未検査'
+
 case_dir="$TEST_TMP/gitlab-docker"
 fake_bin="$case_dir/fake-bin"
 docker_fake="$fake_bin/docker"
@@ -689,7 +890,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.0 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.1 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"
@@ -934,6 +1135,15 @@ make_fake_brew "$fake_bin"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.22.0\nopenssl@3 3.6.5\n'
 assert_contains 'Homebrew の curl 8.22.0 は修正版 8.23.0 より古い WARN' "$case_dir/output.txt" 'WARN  Homebrew の curl 8\.22\.0 は修正版 8\.23\.0 より古い版です（CVE-2026-92392.*）。brew upgrade curl'
 assert_not_contains '修正版の openssl@3 3.6.5 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
+
+case_dir="$TEST_TMP/brew-bind"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='bind 9.20.29\n'
+assert_contains 'Homebrew の bind 9.20.29 は修正版 9.20.30 より古い WARN' "$case_dir/output.txt" 'WARN  Homebrew の bind 9\.20\.29 は修正版 9\.20\.30 より古い版です（CVE-2026-94300.*）。brew upgrade bind'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='bind 9.20.30\n'
+assert_not_contains 'Homebrew の bind 9.20.30 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の bind'
 
 case_dir="$TEST_TMP/brew-curl-fixed"
 fake_bin="$case_dir/fake-bin"

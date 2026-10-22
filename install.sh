@@ -34,6 +34,7 @@ install -m 644 "$SCRIPT_DIR/VERSION" "$INSTALL_DIR/VERSION" || fail "版情報�
 install -m 644 "$SCRIPT_DIR/config/pkg-denylist.tsv" "$INSTALL_DIR/config/pkg-denylist.tsv" || fail "照合リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/security-packages.txt" "$INSTALL_DIR/config/security-packages.txt" || fail "セキュリティ部品リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/security-minimums.tsv" "$INSTALL_DIR/config/security-minimums.tsv" || fail "最低版リストをコピーできません"
+install -m 644 "$SCRIPT_DIR/config/python-pins.tsv" "$INSTALL_DIR/config/python-pins.tsv" || fail "Python の安全な更新先リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/tls-probes.tsv" "$INSTALL_DIR/config/tls-probes.tsv" || fail "証明書点検リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/actions-denylist.tsv" "$INSTALL_DIR/config/actions-denylist.tsv" || fail "侵害された GitHub Actions のリストをコピーできません"
 

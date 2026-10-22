@@ -27,8 +27,12 @@ java	26	EOL	サポートが終わった系列（Java 27 GA 後に終了）
 java	27	27.0.1	Oracle 2026年10月の定例更新（Java SE 55件）
 java	*	EOL	サポートが終わった非 LTS 系列
 # 部品名の種類: php・node・java・gitlab・macos（sw_vers -productVersion）・claude（Claude Code の CLI）
+#   pip・certifi（Python の site-packages の中の版。Python は動かさずファイルを読む）・uv（CLI と site-packages の uv）
 #   app:<バンドル ID>（/Applications などの .app の Info.plist。系列の列は * で全版）
 #   brew:<formula>（Homebrew の formula。brew list --versions の版）
+pip	*	26.2.2	eMudhra の証明書事故（pip は同梱の証明書リストを外せない・Python 公式の告知 2026-10-20）
+certifi	*	2026.10.19	GHSA-6q48-6c7w-9gw2（critical・eMudhra の証明書事故）
+uv	*	0.13.4	eMudhra の証明書事故（Python 公式の告知 2026-10-20）
 macos	15	15.8.1	CVE-2026-86950（Apple・CISA KEV・悪用確認済み）
 macos	26	26.7.1	CVE-2026-86950（Apple・CISA KEV・悪用確認済み）
 macos	EOL	15	CVE-2026-86950 の修正版が出ていない系列（Sonoma 14 以前）
@@ -42,3 +46,5 @@ brew:openssl@3	3.6	3.6.5	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
 brew:openssl@3	3.5	3.5.9	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
 brew:openssl@3	3.4	3.4.8	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
 brew:openssl@4	4.0	4.0.3	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
+brew:bind	9.20	9.20.30	CVE-2026-94300（BIND 9 の named・GSS-TSIG・ISC 2026-10-21）
+brew:bind	9.21	9.21.27	CVE-2026-94300（BIND 9 の named・GSS-TSIG・ISC 2026-10-21）
