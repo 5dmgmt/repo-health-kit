@@ -126,6 +126,7 @@ DENY_SCANNER="${RH_DENY_SCANNER:-$SCRIPT_DIR/pkg-denylist-scan.py}"
 VULN_ALLOW_FILE="${RH_VULN_ALLOW_FILE:-$HOME/.config/repo-health-kit/vuln-allow.tsv}"
 SECURITY_PACKAGES="${RH_SECURITY_PACKAGES:-$KIT_DIR/config/security-packages.txt}"
 SECURITY_MINIMUMS="${RH_SECURITY_MINIMUMS:-$KIT_DIR/config/security-minimums.tsv}"
+ACTIONS_DENYLIST="${RH_ACTIONS_DENYLIST:-$KIT_DIR/config/actions-denylist.tsv}"
 TLS_PROBES="${RH_TLS_PROBES:-$KIT_DIR/config/tls-probes.tsv}"
 
 mkdir -p "$LOG_DIR" "$STATE_DIR" || fatal "ログまたは状態の保存先を作成できません"
@@ -428,6 +429,87 @@ EOF
   fi
 }
 
+scan_actions_denylist() {
+  local repo="$1" repo_name="$2" output rc line prefix workflow action reason
+  if [ ! -f "$ACTIONS_DENYLIST" ]; then
+    add_failure "$repo_name — GitHub Actions 照合が動いていません（同梱リスト不足）"
+    return
+  fi
+  output="$TMP_DIR/actions-$(streak_key "$repo").txt"
+  # 追跡中の .github/workflows/*.yml|*.yaml の uses: を読み、owner/repo（下のパス・@ 以降は無視・大小文字は区別しない）を表と比べる
+  python3 - "$repo" "$ACTIONS_DENYLIST" > "$output" 2>/dev/null <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+deny = {}
+for raw in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split("\t")
+    deny[parts[0].strip().lower()] = parts[1].strip() if len(parts) > 1 else "理由未記入"
+if not deny:
+    print("ACTIONSKIP|-|-|照合リストが空です")
+    raise SystemExit(2)
+
+result = subprocess.run(
+    ["git", "-c", "core.quotepath=false", "ls-files", "-z"],
+    cwd=repo,
+    capture_output=True,
+    timeout=30,
+    check=False,
+)
+uses_line = re.compile(r"""^\s*(?:-\s*)?uses\s*:\s*['"]?([^'"#\s]+)""")
+seen = set()
+for raw in result.stdout.split(b"\0"):
+    if not raw:
+        continue
+    try:
+        rel = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        continue
+    lower_rel = rel.lower()
+    if not lower_rel.startswith(".github/workflows/") or not lower_rel.endswith((".yml", ".yaml")):
+        continue
+    try:
+        text = (repo / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        continue
+    for line in text.splitlines():
+        match = uses_line.match(line)
+        if not match:
+            continue
+        value = match.group(1)
+        if value.startswith(("./", "docker://")):
+            continue
+        parts = value.split("@", 1)[0].split("/")
+        if len(parts) < 2:
+            continue
+        action = "/".join(parts[:2]).lower()
+        reason = deny.get(action)
+        if reason is None or (rel, action) in seen:
+            continue
+        seen.add((rel, action))
+        print("|".join(("ACTION", rel.replace("|", "_"), action.replace("|", "_"), reason.replace("|", "_"))))
+PY
+  rc=$?
+  while IFS= read -r line; do
+    IFS='|' read -r prefix workflow action reason <<EOF
+$line
+EOF
+    case "$prefix" in
+      ACTION) add_failure "$repo_name — 侵害された GitHub Action（${action}）を使っています。workflow から外し、そのリポの secret を入れ替えてください（${reason}・${workflow}）" ;;
+      ACTIONSKIP) add_failure "$repo_name — GitHub Actions 照合が動いていません: ${reason}" ;;
+    esac
+  done < "$output"
+  if [ "$rc" -ne 0 ] && [ ! -s "$output" ]; then
+    add_failure "$repo_name — GitHub Actions 照合が異常終了しました"
+  fi
+}
+
 check_git_size() {
   local repo="$1" repo_name="$2" git_dir kb mb size_file previous growth
   git_dir="$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || return
@@ -603,6 +685,7 @@ check_repo() {
   scan_nonstandard_env "$repo" "$repo_name"
   scan_manifests "$repo" "$repo_name"
   scan_denylist "$repo" "$repo_name"
+  scan_actions_denylist "$repo" "$repo_name"
   add_detail "$repo_name — fetch=$fetch branch=$branch ahead=$ahead behind=$behind dirty=$dirty stash=$stash state=$state"
 }
 
@@ -702,6 +785,7 @@ check_cli_tools() {
           AUTOFIXED[${#AUTOFIXED[@]}]="$tool — メジャー版遅れ $current → $latest を自動更新"
         else
           add_warning "$tool — メジャー版が遅れています $current → $latest"
+          [ "$tool" != "claude" ] || real_path_of "$path" >> "$TMP_DIR/cli-major-warned.claude"
         fi
       else
         CLI_UPDATES[${#CLI_UPDATES[@]}]="$tool — $current → $latest"
@@ -716,9 +800,266 @@ security_detail() {
   add_detail "Mac のセキュリティ — $*"
 }
 
+# 判定表（security-minimums.tsv）から、部品と版に当たる行を探します。結果は MIN_ROW_* に入ります。
+# 系列は x.y → x → * の順に探し、いちばん細かく当たった行を採ります。
+# 系列の列が EOL の行は、最低版の列の値（これより古い版は修正版が出ない）を MIN_ROW_EOL_THRESHOLD に入れます。
+lookup_minimum_row() {
+  local component="$1" version="$2" major rest minor series level
+  local row_component row_series row_minimum row_reason
+  MIN_ROW_MINIMUM=""; MIN_ROW_REASON=""; MIN_ROW_EOL_THRESHOLD=""; MIN_ROW_EOL_REASON=""
+  major="${version%%.*}"
+  series="$major"
+  case "$version" in
+    *.*) rest="${version#*.}"; minor="${rest%%.*}"; series="${major}.${minor}" ;;
+  esac
+  level=0
+  while IFS=$'\t' read -r row_component row_series row_minimum row_reason; do
+    case "$row_component" in ''|\#*) continue;; esac
+    [ "$row_component" = "$component" ] || continue
+    if [ "$row_series" = "EOL" ]; then
+      MIN_ROW_EOL_THRESHOLD="$row_minimum"; MIN_ROW_EOL_REASON="$row_reason"
+    elif [ "$row_series" = "$series" ]; then
+      MIN_ROW_MINIMUM="$row_minimum"; MIN_ROW_REASON="$row_reason"; level=3
+    elif [ "$row_series" = "$major" ] && [ "$level" -lt 3 ]; then
+      MIN_ROW_MINIMUM="$row_minimum"; MIN_ROW_REASON="$row_reason"; level=2
+    elif [ "$row_series" = "*" ] && [ "$level" -lt 2 ]; then
+      MIN_ROW_MINIMUM="$row_minimum"; MIN_ROW_REASON="$row_reason"; level=1
+    fi
+  done < "$SECURITY_MINIMUMS"
+}
+
+# 文字列の先頭にある数字の版（1〜4 桁）だけを取り出します。取れなければ何も出しません。
+leading_version() {
+  printf '%s\n' "$1" | LC_ALL=C grep -Eo '^[0-9]+(\.[0-9]+){0,3}' | head -1
+}
+
+real_path_of() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+
+check_macos_minimum() {
+  local version major
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="macOS の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  if [ -n "${RH_MACOS_VERSION+x}" ]; then
+    version="$RH_MACOS_VERSION"
+  else
+    version="$(sw_vers -productVersion 2>/dev/null || true)"
+  fi
+  version="$(leading_version "$version")"
+  major="${version%%.*}"
+  if [ -z "$version" ] || ! is_uint "$major"; then
+    NOTES[${#NOTES[@]}]="macOS — 版を判定できず未検査"
+    return
+  fi
+  lookup_minimum_row macos "$version"
+  if [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != "EOL" ]; then
+    if version_less_than "$version" "$MIN_ROW_MINIMUM"; then
+      add_warning "macOS ${version} は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。ソフトウェアアップデートで更新してください"
+    else
+      security_detail "macOS ${version} — 最低版 ${MIN_ROW_MINIMUM} 以上"
+    fi
+  elif [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
+    add_warning "macOS ${version} はサポート終了の系列です（${MIN_ROW_REASON}）。この系列には修正版が出ていません。新しい macOS へ更新してください"
+  elif [ -n "$MIN_ROW_EOL_THRESHOLD" ] && version_less_than "$version" "$MIN_ROW_EOL_THRESHOLD"; then
+    add_warning "macOS ${version} はサポート終了の系列です（${MIN_ROW_EOL_REASON}）。この系列には修正版が出ていません。新しい macOS へ更新してください"
+  else
+    security_detail "macOS ${version} — この系列は最低版リストに未掲載"
+  fi
+}
+
+check_claude_minimum() {
+  local candidates ordered seen_real raw real version cli_marker
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="Claude Code の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  candidates="$TMP_DIR/claude-candidates.list"
+  ordered="$TMP_DIR/claude-ordered.list"
+  seen_real="$TMP_DIR/claude-seen.list"
+  cli_marker="$TMP_DIR/cli-major-warned.claude"
+  : > "$candidates"; : > "$seen_real"
+  if [ -n "${RH_CLAUDE_CANDIDATES+x}" ]; then
+    printf '%s\n' "$RH_CLAUDE_CANDIDATES" >> "$candidates"
+  else
+    type -aP claude 2>/dev/null >> "$candidates" || true
+    [ -x "$HOME/.claude/local/claude" ] && printf '%s\n' "$HOME/.claude/local/claude" >> "$candidates"
+    [ -x "$HOME/.local/bin/claude" ] && printf '%s\n' "$HOME/.local/bin/claude" >> "$candidates"
+  fi
+  # 見つけた順を保ったまま、同じパスの重複を除く
+  awk 'NF && !seen[$0]++' "$candidates" > "$ordered"
+  while IFS= read -r raw; do
+    [ -f "$raw" ] && [ -x "$raw" ] || continue
+    real="$(real_path_of "$raw")"
+    if LC_ALL=C grep -Fqx "$real" "$seen_real" 2>/dev/null; then continue; fi
+    printf '%s\n' "$real" >> "$seen_real"
+    version="$(run_timeout 20 "$raw" --version 2>/dev/null | head -1 | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -z "$version" ]; then
+      NOTES[${#NOTES[@]}]="Claude Code（${raw}）— 版を判定できず未検査"
+      continue
+    fi
+    lookup_minimum_row claude "$version"
+    if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
+      security_detail "Claude Code ${version}（${raw}）— この系列は最低版リストに未掲載"
+    elif ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
+      security_detail "Claude Code ${version}（${raw}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+    elif [ -f "$cli_marker" ] && LC_ALL=C grep -Fqx "$real" "$cli_marker" 2>/dev/null; then
+      # CLI の更新確認がすでに「メジャー版が遅れています」の WARN にしている。同じ版の話を 2 度 WARN にしない
+      security_detail "Claude Code ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）— CLI の更新確認の WARN と同じ話のため、WARN は 1 件にまとめています"
+    else
+      add_warning "Claude Code ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。claude update で更新してください（npm で入れた場合は npm install -g @anthropic-ai/claude-code@latest）"
+    fi
+  done < "$ordered"
+}
+
+# .app のフォルダを 1 行ずつ出します。/Applications は 1 段下（/Applications/*/*.app）まで、~/Applications は直下だけ。
+# RH_APP_DIRS（改行区切りのフォルダ一覧）があれば、それだけを 1 段下まで探します（テスト用）。
+list_app_bundles() {
+  local root
+  if [ -n "${RH_APP_DIRS+x}" ]; then
+    while IFS= read -r root; do
+      [ -n "$root" ] && [ -d "$root" ] || continue
+      find "$root" -mindepth 1 -maxdepth 2 -type d -name '*.app' -prune -print 2>/dev/null
+    done <<EOF
+$RH_APP_DIRS
+EOF
+    return
+  fi
+  [ -d /Applications ] && find /Applications -mindepth 1 -maxdepth 2 -type d -name '*.app' -prune -print 2>/dev/null
+  [ -d "$HOME/Applications" ] && find "$HOME/Applications" -mindepth 1 -maxdepth 1 -type d -name '*.app' -prune -print 2>/dev/null
+  return 0
+}
+
+check_app_minimums() {
+  local plutil_cmd apps app plist bundle component raw_version version label remedy running
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="アプリの最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
+  if [ -z "$plutil_cmd" ]; then
+    NOTES[${#NOTES[@]}]="アプリの最低版は plutil が無いため未検査"
+    return
+  fi
+  apps="$TMP_DIR/app-bundles.list"
+  list_app_bundles | awk 'NF && !seen[$0]++' > "$apps"
+  while IFS= read -r app; do
+    plist="$app/Contents/Info.plist"
+    [ -f "$plist" ] || continue
+    # アプリは起動せず、Info.plist だけを読む
+    bundle="$("$plutil_cmd" -extract CFBundleIdentifier raw -o - "$plist" 2>/dev/null || true)"
+    [ -n "$bundle" ] || continue
+    component="app:${bundle}"
+    awk -F '\t' -v component="$component" '$1 == component { found=1 } END { exit !found }' "$SECURITY_MINIMUMS" || continue
+    raw_version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+    version="$(leading_version "$raw_version")"
+    if [ -z "$version" ]; then
+      raw_version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+      version="$(leading_version "$raw_version")"
+    fi
+    if [ -z "$version" ]; then
+      NOTES[${#NOTES[@]}]="${bundle}（${app}）— 版を判定できず未検査"
+      continue
+    fi
+    if [ "$bundle" = "org.mozilla.firefox" ] \
+      && LC_ALL=C grep -qi 'esr' "$app/Contents/Resources/defaults/pref/channel-prefs.js" 2>/dev/null; then
+      NOTES[${#NOTES[@]}]="Firefox ESR（${app}）— ESR の系列は未検査"
+      continue
+    fi
+    lookup_minimum_row "$component" "$version"
+    if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
+      security_detail "${bundle} ${version}（${app}）— この系列は最低版リストに未掲載"
+      continue
+    fi
+    if ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
+      security_detail "${bundle} ${version}（${app}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+      continue
+    fi
+    label="$bundle"; remedy="アプリを最新版へ更新してください"
+    case "$bundle" in
+      com.google.Chrome) label="Chrome"; remedy="Chrome を再起動すると更新されます（設定 → Chrome について）" ;;
+      org.mozilla.firefox) label="Firefox"; remedy="メニュー → Firefox について で更新" ;;
+      com.anthropic.claudefordesktop) label="Claude Desktop"; remedy="Claude を開いて更新（メニュー → 更新を確認）" ;;
+      com.plexapp.plexmediaserver)
+        label="Plex Media Server"
+        remedy="Plex Media Server を ${MIN_ROW_MINIMUM} 以上へ。動いていた場合は、侵害されていないかの確認も必要です（Plex の告知）"
+        ;;
+    esac
+    running="no"
+    if [ "$bundle" = "com.plexapp.plexmediaserver" ] && command -v pgrep >/dev/null 2>&1 \
+      && pgrep -x "Plex Media Server" >/dev/null 2>&1; then
+      running="yes"
+    fi
+    if [ "$running" = "yes" ]; then
+      # サーバーとして外から攻撃される（実際に悪用されている）ので FAIL にする
+      add_failure "${label} ${version}（${app}）が動いています。修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+    else
+      add_warning "${label} ${version}（${app}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+    fi
+  done < "$apps"
+}
+
+# Homebrew の formula の版が、判定表（brew:<formula>）の最低版より古いかを調べます。
+# 古ければ 0 を返し、BREW_MIN_MINIMUM と BREW_MIN_REASON に最低版と理由を入れます。
+# Homebrew の版は 8.22.0_1 のように _ で修正番号が付くため、_ より前だけで比べます。
+brew_below_minimum() {
+  local formula="$1" version="${2%%_*}"
+  BREW_MIN_MINIMUM=""; BREW_MIN_REASON=""
+  [ -f "$SECURITY_MINIMUMS" ] || return 1
+  lookup_minimum_row "brew:${formula}" "$version"
+  [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != "EOL" ] || return 1
+  version_less_than "$version" "$MIN_ROW_MINIMUM" || return 1
+  BREW_MIN_MINIMUM="$MIN_ROW_MINIMUM"; BREW_MIN_REASON="$MIN_ROW_REASON"
+  return 0
+}
+
+# Homebrew の formula（curl・openssl@3 など）の版を点検します。Apple 標準の curl・LibreSSL は
+# Apple の更新でしか直らないため比べません（TLS の点検の注記と同じ扱い）。
+check_brew_formula_minimums() {
+  local brew_cmd formulas formula output version words warned_file
+  local row_component _row_series _row_minimum _row_reason
+  [ -f "$SECURITY_MINIMUMS" ] || return
+  if [ -n "${RH_BREW+x}" ]; then brew_cmd="$RH_BREW"; else brew_cmd="$(command -v brew 2>/dev/null || true)"; fi
+  [ -n "$brew_cmd" ] && [ -x "$brew_cmd" ] || return
+  formulas="$TMP_DIR/brew-minimum-formulas.list"
+  warned_file="$TMP_DIR/brew-security-warned.list"
+  : > "$formulas"
+  while IFS=$'\t' read -r row_component _row_series _row_minimum _row_reason; do
+    case "$row_component" in brew:*) printf '%s\n' "${row_component#brew:}" >> "$formulas";; esac
+  done < "$SECURITY_MINIMUMS"
+  LC_ALL=C sort -u "$formulas" > "$formulas.sorted"
+  while IFS= read -r formula; do
+    [ -n "$formula" ] || continue
+    output="$(run_timeout 30 "$brew_cmd" list --versions "$formula" 2>/dev/null || true)"
+    [ -n "$output" ] || continue
+    read -r -a words <<EOF
+$output
+EOF
+    [ "${#words[@]}" -gt 1 ] || continue
+    # 1 つ目は formula 名。2 つ目からが入っている版（複数あればそれぞれ比べる）
+    for version in "${words[@]:1}"; do
+      if brew_below_minimum "$formula" "$version"; then
+        if [ -f "$warned_file" ] && LC_ALL=C grep -Fqx "$formula" "$warned_file" 2>/dev/null; then
+          # check_brew_security の「更新が出ています」の WARN が、すでにこの formula を理由つきで知らせている
+          security_detail "Homebrew の ${formula} ${version} は修正版 ${BREW_MIN_MINIMUM} より古い版です（${BREW_MIN_REASON}）— 更新待ちの WARN と同じ話のため、WARN は 1 件にまとめています"
+        else
+          add_warning "Homebrew の ${formula} ${version} は修正版 ${BREW_MIN_MINIMUM} より古い版です（${BREW_MIN_REASON}）。brew upgrade ${formula} で更新してください"
+        fi
+      elif [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != "EOL" ]; then
+        security_detail "Homebrew の ${formula} ${version} — 最低版 ${MIN_ROW_MINIMUM} 以上"
+      else
+        security_detail "Homebrew の ${formula} ${version} — この系列は最低版リストに未掲載"
+      fi
+    done
+  done < "$formulas.sorted"
+}
+
 check_brew_security() {
   local outdated_json rows remaining name installed latest description failed_description
-  local upgrade_description brew_prefix
+  local upgrade_description brew_prefix item installed_version
+  local -a installed_versions
   command -v brew >/dev/null 2>&1 || return
   if ! run_timeout 300 brew update --quiet >/dev/null 2>&1; then
     NOTES[${#NOTES[@]}]="Homebrew の更新情報を取得できず未検査"
@@ -807,11 +1148,24 @@ PY
   fi
 
   description=""
+  : > "$TMP_DIR/brew-security-warned.list"
   while IFS=$'\t' read -r name installed latest; do
+    item="$name $installed → $latest"
+    # 最低版リスト（brew:<formula>）に載る formula が修正版より古いときは、同じ話を 2 度 WARN にせず、理由をここに添える
+    IFS=',' read -r -a installed_versions <<EOF
+$installed
+EOF
+    for installed_version in "${installed_versions[@]}"; do
+      if brew_below_minimum "$name" "$installed_version"; then
+        item="${item}（修正版 ${BREW_MIN_MINIMUM} 未満: ${BREW_MIN_REASON}）"
+        break
+      fi
+    done
+    printf '%s\n' "$name" >> "$TMP_DIR/brew-security-warned.list"
     if [ -z "$description" ]; then
-      description="$name $installed → $latest"
+      description="$item"
     else
-      description="${description}、$name $installed → $latest"
+      description="${description}、$item"
     fi
   done < "$remaining"
   add_warning "Mac のセキュリティ部品に更新が出ています: ${description}（brew upgrade で更新できます）"
@@ -1169,10 +1523,17 @@ EOF
         minimum="$row_minimum"; reason="$row_reason"
       elif [ "$row_series" = "EOL" ]; then
         eol_threshold="$row_minimum"; eol_reason="$row_reason"
-      elif [ "$row_series" = "18.11" ]; then
-        eol_minimum="$row_minimum"
       fi
     done < "$SECURITY_MINIMUMS"
+    if [ -n "$eol_threshold" ]; then
+      while IFS=$'\t' read -r row_component row_series row_minimum _row_reason; do
+        case "$row_component" in ''|\#*) continue;; esac
+        if [ "$row_component" = "gitlab" ] && [ "$row_series" = "$eol_threshold" ]; then
+          eol_minimum="$row_minimum"
+          break
+        fi
+      done < "$SECURITY_MINIMUMS"
+    fi
     matched="no"
     if [ -n "$minimum" ] && version_less_than "$version" "$minimum"; then
       matched="minimum"
@@ -1180,7 +1541,11 @@ EOF
       matched="eol"; reason="$eol_reason"; minimum="$eol_minimum"
     fi
     [ "$matched" != "no" ] || continue
-    remedy="GitLab の更新手順（https://docs.gitlab.com/update/ ）で ${minimum} 以上へ。単一サーバー構成では更新中に止まります"
+    if [ -n "$minimum" ]; then
+      remedy="GitLab の更新手順（https://docs.gitlab.com/update/ ）で ${minimum} 以上へ。単一サーバー構成では更新中に止まります"
+    else
+      remedy="GitLab の更新手順（https://docs.gitlab.com/update/ ）でサポート中の系列へ。単一サーバー構成では更新中に止まります"
+    fi
     if [ "$matched" = "eol" ]; then
       if [ "$running" = "yes" ]; then
         add_failure "GitLab ${version}（${image}）が動いています。サポート終了の系列です（${reason}）。${remedy}"
@@ -1394,6 +1759,10 @@ check_mac_security() {
   check_minimum_versions node
   check_java_versions
   check_gitlab_docker
+  check_macos_minimum
+  check_claude_minimum
+  check_app_minimums
+  check_brew_formula_minimums
   check_tls_security
   check_software_updates
   check_kit_update

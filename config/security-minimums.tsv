@@ -26,3 +26,19 @@ java	25	25.0.5	Oracle 2026年10月の定例更新（Java SE 55件）
 java	26	EOL	サポートが終わった系列（Java 27 GA 後に終了）
 java	27	27.0.1	Oracle 2026年10月の定例更新（Java SE 55件）
 java	*	EOL	サポートが終わった非 LTS 系列
+# 部品名の種類: php・node・java・gitlab・macos（sw_vers -productVersion）・claude（Claude Code の CLI）
+#   app:<バンドル ID>（/Applications などの .app の Info.plist。系列の列は * で全版）
+#   brew:<formula>（Homebrew の formula。brew list --versions の版）
+macos	15	15.8.1	CVE-2026-86950（Apple・CISA KEV・悪用確認済み）
+macos	26	26.7.1	CVE-2026-86950（Apple・CISA KEV・悪用確認済み）
+macos	EOL	15	CVE-2026-86950 の修正版が出ていない系列（Sonoma 14 以前）
+claude	2	2.1.260	GHSA-gfvf-j8jh-jxxw（Low・2.1.260 未満）／GHSA-5j29-h97v-84ch（High・2.1.129 未満）（Claude Code）
+app:com.anthropic.claudefordesktop	*	1.15962.0	GHSA-v234-4jrq-mgg6（Claude Desktop・2026-09-25）
+app:com.plexapp.plexmediaserver	*	1.43.3.10861	Plex2Shell（CVE-2026-96652 ほか4件・CISA KEV・悪用確認済み）
+app:com.google.Chrome	*	156.0.8078.47	Chrome 156 の安全修正（2026-10-20）
+app:org.mozilla.firefox	*	158.0.1	MFSA-2026-106／111（Firefox 158）
+brew:curl	8	8.23.0	CVE-2026-92392（curl・2026-10-14）
+brew:openssl@3	3.6	3.6.5	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
+brew:openssl@3	3.5	3.5.9	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
+brew:openssl@3	3.4	3.4.8	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
+brew:openssl@4	4.0	4.0.3	CVE-2026-84782 ほか（OpenSSL・2026-09-29）

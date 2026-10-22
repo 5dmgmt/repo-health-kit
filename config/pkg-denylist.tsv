@@ -20,3 +20,177 @@ ecto	5.0.1	Shai-Hulud 2026-08-04
 @picsart/ai-sdk	3.32.2	Shai-Hulud 2026-08-04 二次感染
 @qlik/embed-runtime	1.6.4	Shai-Hulud 2026-08-04 二次感染
 picasso.js	2.11.6	Shai-Hulud 2026-08-04 二次感染
+
+# --- 0.4.0 で追加 ---
+# 版の列が * の行は「その名前なら全版が対象」です。名前の先頭が pypi: の行は Python のパッケージです（PEP 503 で名前を正規化して照合します）。
+
+# LiteLLM（2026-10-21、公式 incident report）
+# https://docs.litellm.ai/blog/security-incident-oct-21-2026
+pypi:litellm	1.107.0	LiteLLM のリリース経路の侵害 2026-10-21（PyPI の全 wheel・認証情報を盗む）
+
+# Tensorlake（2026-10-08、GHSA-8g63-53c9-65j2）
+# https://github.com/tensorlakeai/tensorlake/security/advisories/GHSA-8g63-53c9-65j2
+tensorlake	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-darwin-arm64	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-linux-arm64-gnu	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-linux-arm64-musl	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-linux-x64-gnu	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-linux-x64-musl	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+tensorlake-native-win32-x64	0.5.144	Tensorlake npm 版の侵害 2026-10-08（認証情報を盗むワーム）
+
+# MemTensor（2026-09-23、SafeDep）
+# https://safedep.io/memtensor-sckit-worm-npm-pypi/
+@memtensor/memos-cloud-openclaw-plugin	0.1.21	MemTensor sckit ワーム 2026-09-23（認証情報を盗む）
+@memtensor/memos-cloud-openclaw-plugin	0.1.23	MemTensor sckit ワーム 2026-09-23（認証情報を盗む）
+@memtensor/memos-cloud-openclaw-plugin	0.1.25	MemTensor sckit ワーム 2026-09-23（認証情報を盗む）
+pypi:MemoryOS	2.0.34	MemTensor sckit ワーム 2026-09-23（認証情報を盗む）（PyPI）
+
+# MALFEX（2026-10-05、Checkmarx Zero）
+# https://checkmarx.com/zero-post/malfex-npm-malware-campaign-three-payloads-and-an-adversary-that-signs-their-work/
+function-flag	1.7.3	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	4.0.0	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	3.0.0	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	2.3.5	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	2.3.6	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	2.3.7	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	2.3.8	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-flag	2.3.9	MALFEX Windows 向けマルウェア 2026-10（ダウンローダー）
+function-color	1.7.3	MALFEX Windows 向けマルウェア 2026-10（function-flag を呼ぶ）
+function-color	1.0.0	MALFEX Windows 向けマルウェア 2026-10（function-flag を呼ぶ）
+cdn-img-fetch	1.0.0	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの取得役）
+cdn-img-fetch	1.0.1	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの取得役）
+cdn-img-fetch	1.0.2	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの取得役）
+cdn-img-fetch	1.0.3	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの取得役）
+img-to-native	1.0.0	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの復号役）
+img-to-native	1.0.1	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの復号役）
+img-to-native	1.0.2	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの復号役）
+img-to-native	1.0.3	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの復号役）
+native-runner	1.0.0	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの実行役）
+native-runner	1.0.1	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの実行役）
+native-runner	1.0.2	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの実行役）
+native-runner	1.0.3	MALFEX Windows 向けマルウェア 2026-10（窃取チェーンの実行役）
+tlxbnhd	0.0.1	MALFEX Windows 向けマルウェア 2026-10（Overlord RAT ローダー）
+tldriver	0.0.1	MALFEX Windows 向けマルウェア 2026-10（Overlord RAT ローダー）
+mxdriver	0.0.1	MALFEX Windows 向けマルウェア 2026-10（Overlord RAT ローダー）
+mxdriver	0.0.2	MALFEX Windows 向けマルウェア 2026-10（Overlord RAT ローダー）
+
+# MALFEX の続報（2026-10-13、SafeDep）
+# https://safedep.io/malfex-imgdecode-npm-native-addon-loader/
+imgdecode	1.0.0	MALFEX Windows 向けマルウェア 2026-10（Windows の DLL ローダー）
+imgdecode	1.0.1	MALFEX Windows 向けマルウェア 2026-10（Windows の DLL ローダー）
+imgdecode	1.0.2	MALFEX Windows 向けマルウェア 2026-10（Windows の DLL ローダー）
+imgdecode	1.0.3	MALFEX Windows 向けマルウェア 2026-10（Windows の DLL ローダー）
+imgbundle	1.0.0	MALFEX Windows 向けマルウェア 2026-10（復号役の置き換え）
+imgbundle	1.0.1	MALFEX Windows 向けマルウェア 2026-10（復号役の置き換え）
+imgbundle	1.0.2	MALFEX Windows 向けマルウェア 2026-10（復号役の置き換え）
+runhelper	1.0.0	MALFEX Windows 向けマルウェア 2026-10（シェルコード実行役）
+
+# Apex Accelerator（2026-10-12、Elastic Security Labs。2 つとも公開当初から悪性で、安全な版は無い）
+# https://www.elastic.co/security-labs/threat-command/apex-accelerator-malicious-npm-packages
+@apexacc/cli	1.6.1	Apex Accelerator 2026-10-12（Mac と Windows 向けマルウェア・遠隔でコマンドを実行）・確認された悪性版
+@apexacc/cli	*	Apex Accelerator 2026-10-12（Mac と Windows 向けマルウェア・遠隔でコマンドを実行）・安全な版なし
+@apexacc/audit	*	Apex Accelerator 2026-10-12（Mac と Windows 向けマルウェア・遠隔でコマンドを実行）・安全な版なし
+
+# PhantomSub（2026-09-28、OX Security。101 件すべて版は Any ＝ 全版が対象）
+# https://www.ox.security/blog/phantomsub-malicious-npm-campaign-secretly-adds-users-to-whatsapp-spam-channels/
+ourin-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@nexustechpro/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@badzz88/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@ostyado/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+levvleys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@vanzxy/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@yudzxml/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@chatunity/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@kelvdra/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+neuralwhatsapp	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+lilys-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@fyxzpediaa/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+noxleyss	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@xrelly-stack/bails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+alipclutch-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+kurobails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+eliteprotech-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@xayz/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+chromestaff-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@sanzoffc/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@sairidev/baileys-new	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+cloud-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@nyzzpediaa/baileys-new	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+ishumdz-bail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+nishiki-bail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+diezyclutch-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+oktz-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+my-auto-follow	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@kanaraa/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@fer2809fl/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+jexkcode	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+rafael-bails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@ikanngeming/ikannbail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+zero-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@zeronexcode/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@sakataoffc/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@astracode/byles-new	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@saazkira/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@lekzo/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@revizahoshii/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+my-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+noverojava	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+sauruskyah-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@modss/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@fhkryxv/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@japofc/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@lendxntaa/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+baileys-xbats	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+kiyoramarkets	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@levvicode/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+luoxy-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@mikudeveloper/grace	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+cortana-md-engine	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bellaxchuu/flowblue	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@wanzlonely/bails4u	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+mikuhostt-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+cantarella-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+saurustheking	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@mivesensei/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@revizahoshii/hoshino	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@noxleyss/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@fhkryxv/baileys-new	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@fazzcodestudio/wa-web	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@ikyyjee/ikyysingle	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+focashi	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@zanta/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+shadowmd	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@ikyyjee/ikyysinggle	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+itsmeeaizat-bailey	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bellaxchuu/privatebails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+arsya-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+xzvexpzcbailey	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@mr-supun-fernando/supunmd-bail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+yonzofficial	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+fixo-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@jojoxyz/condemnedforce-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@rixxcodex/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@lendkzn/xntaabail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+spencer-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@wenzyx1/bails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+yonzoffic-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@xatancchii/velycxbail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@kxa/xbails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+monte-md-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+albert-anitabaileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@web2apk/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+dilxztech	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+kiki-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+anuaja	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bellaxchuu/xtrxbails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+noverojs	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+sea-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+focaleys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bottino/baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+saturn-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bellaxchuu/belbails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@bellaxchuu/teambails	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+@nyzzpedia/baileys-new	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+noxxleys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+saturn-bail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+kasabaileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）

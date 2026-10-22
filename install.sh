@@ -35,6 +35,7 @@ install -m 644 "$SCRIPT_DIR/config/pkg-denylist.tsv" "$INSTALL_DIR/config/pkg-de
 install -m 644 "$SCRIPT_DIR/config/security-packages.txt" "$INSTALL_DIR/config/security-packages.txt" || fail "セキュリティ部品リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/security-minimums.tsv" "$INSTALL_DIR/config/security-minimums.tsv" || fail "最低版リストをコピーできません"
 install -m 644 "$SCRIPT_DIR/config/tls-probes.tsv" "$INSTALL_DIR/config/tls-probes.tsv" || fail "証明書点検リストをコピーできません"
+install -m 644 "$SCRIPT_DIR/config/actions-denylist.tsv" "$INSTALL_DIR/config/actions-denylist.tsv" || fail "侵害された GitHub Actions のリストをコピーできません"
 
 if [ ! -f "$CONFIG_FILE" ]; then
   install -m 600 "$SCRIPT_DIR/config/config.example.sh" "$CONFIG_FILE" || fail "設定ファイルを作成できません"

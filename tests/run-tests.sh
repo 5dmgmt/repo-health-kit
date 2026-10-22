@@ -69,6 +69,7 @@ run_security() {
     RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
+    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
@@ -81,6 +82,7 @@ make_fake_brew() {
     printf '%s\n' '  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;'
     printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[]}'\''; fi ;;'
     printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
+    printf '%s\n' '  list) printf "%b" "${FAKE_BREW_VERSIONS-}" | while IFS= read -r line; do case "$line" in "$3 "*) printf "%s\n" "$line";; esac; done ;;'
     printf '%s\n' '  --prefix) printf "%s\n" "${FAKE_BREW_PREFIX:-/fake/homebrew}" ;;'
     printf '%s\n' '  *) exit 1 ;;'
     printf '%s\n' 'esac'
@@ -166,7 +168,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..76\n'
+printf '1..149\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -284,7 +286,8 @@ installed_assets=0
 if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/VERSION" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-packages.txt" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/security-minimums.tsv" ] \
-  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/tls-probes.tsv" ]; then
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/tls-probes.tsv" ] \
+  && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/actions-denylist.tsv" ]; then
   installed_assets=1
 fi
 HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
@@ -703,6 +706,401 @@ run_composer "$case_dir/high" "$case_dir/root with space" "$composer_fake"
 assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  composerrepo — 本番依存に critical/high 脆弱性（composer）'
 run_composer "$case_dir/absent" "$case_dir/root with space" ''
 assert_contains 'composer 不在は WARN' "$case_dir/absent/output.txt" 'WARN  composerrepo — composer audit 実行不能（composer 不在）'
+
+# ---- 0.4.0 後半: macOS・Claude Code・アプリ・Homebrew の formula ----
+
+run_macos_case() {
+  local name="$1" version="$2" case_dir fake_bin
+  case_dir="$TEST_TMP/$name"
+  fake_bin="$case_dir/fake-bin"
+  make_fake_brew "$fake_bin"
+  : > "$case_dir/brew.log"
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_MACOS_VERSION="$version"
+}
+
+run_macos_case macos-15-old 15.8.0
+assert_contains 'macOS 15.8.0 は修正版 15.8.1 より古い WARN' "$TEST_TMP/macos-15-old/output.txt" 'WARN  macOS 15\.8\.0 は修正版 15\.8\.1 より古い版です（CVE-2026-86950'
+assert_contains 'macOS の WARN にソフトウェアアップデートの案内を含める' "$TEST_TMP/macos-15-old/output.txt" 'macOS 15\.8\.0 .*ソフトウェアアップデートで更新してください'
+
+run_macos_case macos-15-fixed 15.8.1
+assert_not_contains 'macOS 15.8.1 は要対応に出さない' "$TEST_TMP/macos-15-fixed/output.txt" '(WARN|FAIL)  macOS '
+
+run_macos_case macos-26-old 26.7.0
+assert_contains 'macOS 26.7.0 は修正版 26.7.1 より古い WARN' "$TEST_TMP/macos-26-old/output.txt" 'WARN  macOS 26\.7\.0 は修正版 26\.7\.1 より古い版です'
+
+run_macos_case macos-14-eol 14.7
+assert_contains 'macOS 14.7 は修正版が出ていない系列の WARN' "$TEST_TMP/macos-14-eol/output.txt" 'WARN  macOS 14\.7 はサポート終了の系列です.*この系列には修正版が出ていません。新しい macOS へ更新してください'
+
+run_macos_case macos-27 27.0.1
+assert_not_contains 'macOS 27.0.1 は表に無い系列で要対応に出さない' "$TEST_TMP/macos-27/output.txt" '(WARN|FAIL)  macOS '
+assert_contains 'macOS 27.0.1 は detail に残す' "$TEST_TMP/macos-27/output.txt" 'macOS 27\.0\.1 — この系列は最低版リストに未掲載'
+
+run_macos_case macos-unknown ''
+assert_contains '版を返さない macOS は未検査の NOTES' "$TEST_TMP/macos-unknown/output.txt" 'macOS — 版を判定できず未検査'
+
+make_fake_claude() {
+  local path="$1"
+  mkdir -p "$(dirname -- "$path")"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'printf "%s\n" "${FAKE_CLAUDE_OUTPUT-}"'
+  } > "$path"
+  chmod +x "$path"
+}
+
+case_dir="$TEST_TMP/claude-old"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.259 (Claude Code)'
+assert_contains 'Claude Code 2.1.259 は修正版 2.1.260 より古い WARN' "$case_dir/output.txt" 'WARN  Claude Code 2\.1\.259（.*fake-bin/claude）は修正版 2\.1\.260 より古い版です（GHSA-gfvf-j8jh-jxxw'
+assert_contains 'Claude Code の WARN に claude update の案内を含める' "$case_dir/output.txt" 'claude update で更新してください'
+
+case_dir="$TEST_TMP/claude-fixed"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.260 (Claude Code)'
+assert_not_contains 'Claude Code 2.1.260 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Claude Code '
+
+case_dir="$TEST_TMP/claude-unknown"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT=''
+assert_contains '版を返さない Claude Code は未検査の NOTES' "$case_dir/output.txt" 'Claude Code（.*fake-bin/claude）— 版を判定できず未検査'
+
+case_dir="$TEST_TMP/claude-symlink"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_claude "$case_dir/real/claude"
+ln -s "$case_dir/real/claude" "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" \
+  RH_CLAUDE_CANDIDATES="$fake_bin/claude
+$case_dir/real/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)'
+if [ "$(LC_ALL=C grep -c 'WARN  Claude Code 2\.1\.250' "$case_dir/output.txt")" = "1" ]; then pass '同じ実体の Claude Code は WARN 1件にまとめる'; else fail '同じ実体の Claude Code は WARN 1件にまとめる'; sed -n '1,40p' "$case_dir/output.txt"; fi
+
+# CLI の更新確認（メジャー版遅れ）が同じ claude を WARN にしたときは、最低版の点検を detail に落とす
+make_fake_cli_set() {
+  local dir="$1" tool
+  mkdir -p "$dir"
+  for tool in codex node gh vercel supabase op; do
+    {
+      printf '%s\n' '#!/bin/bash'
+      printf '%s\n' 'printf "%s\n" "1.0.0"'
+    } > "$dir/$tool"
+    chmod +x "$dir/$tool"
+  done
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'if [ "${1:-}" = "view" ] && [ "${2:-}" = "@anthropic-ai/claude-code" ]; then printf "%s\n" "${FAKE_CLAUDE_LATEST:?}"; else printf "%s\n" "1.0.0"; fi'
+  } > "$dir/npm"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'exit 0'
+  } > "$dir/curl"
+  chmod +x "$dir/npm" "$dir/curl"
+}
+
+case_dir="$TEST_TMP/claude-cli-dup"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_cli_set "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 \
+  RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)' FAKE_CLAUDE_LATEST=3.0.0
+assert_contains 'CLI の更新確認はメジャー版遅れを WARN にする' "$case_dir/output.txt" 'WARN  claude — メジャー版が遅れています 2\.1\.250 → 3\.0\.0'
+assert_not_contains '同じ claude の最低版の話は 2 度目の WARN にしない' "$case_dir/output.txt" 'WARN  Claude Code 2\.1\.250'
+assert_contains '2 度目に出さなかった最低版の話は detail に残す' "$case_dir/output.txt" 'Claude Code 2\.1\.250（.*）は修正版 2\.1\.260 より古い版です.*WARN は 1 件にまとめています'
+
+make_fake_app() {
+  local dir="$1" name="$2" bundle="$3" version="$4"
+  mkdir -p "$dir/$name.app/Contents"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">' '<dict>'
+    printf '<key>CFBundleIdentifier</key>\n<string>%s</string>\n' "$bundle"
+    printf '<key>CFBundleShortVersionString</key>\n<string>%s</string>\n' "$version"
+    printf '%s\n' '</dict>' '</plist>'
+  } > "$dir/$name.app/Contents/Info.plist"
+}
+
+make_fake_pgrep() {
+  local fake_bin="$1"
+  mkdir -p "$fake_bin"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' '[ "${1:-}" = "-x" ] && [ "${2:-}" = "Plex Media Server" ] && [ "${FAKE_PLEX_RUNNING:-0}" = "1" ]'
+  } > "$fake_bin/pgrep"
+  chmod +x "$fake_bin/pgrep"
+}
+
+case_dir="$TEST_TMP/apps-old"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.46
+make_fake_app "$apps/入れ子" 'Claude' com.anthropic.claudefordesktop 1.15961.9
+make_fake_app "$apps" 'Firefox' org.mozilla.firefox 140.4.0
+mkdir -p "$apps/Firefox.app/Contents/Resources/defaults/pref"
+printf '%s\n' 'pref("app.update.channel", "esr");' > "$apps/Firefox.app/Contents/Resources/defaults/pref/channel-prefs.js"
+make_fake_app "$apps" 'Other' com.example.other 0.0.1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_contains 'Chrome 156.0.8078.46 は修正版 156.0.8078.47 より古い WARN' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.46（.*Google Chrome\.app）は修正版 156\.0\.8078\.47 より古い版です'
+assert_contains 'Chrome の WARN に直し方を含める' "$case_dir/output.txt" 'Chrome を再起動すると更新されます（設定 → Chrome について）'
+assert_contains '1 段下のフォルダにある Claude Desktop 1.15961.9 も WARN' "$case_dir/output.txt" 'WARN  Claude Desktop 1\.15961\.9（.*入れ子/Claude\.app）は修正版 1\.15962\.0 より古い版です'
+assert_contains 'Firefox ESR は比べず NOTES にする' "$case_dir/output.txt" 'Firefox ESR（.*Firefox\.app）— ESR の系列は未検査'
+assert_not_contains 'Firefox ESR は WARN にしない' "$case_dir/output.txt" '(WARN|FAIL)  Firefox '
+assert_not_contains '表に無いアプリは何も出さない' "$case_dir/output.txt" 'com\.example\.other|Other\.app'
+
+case_dir="$TEST_TMP/apps-fixed"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.47
+make_fake_app "$apps" 'Claude' com.anthropic.claudefordesktop 1.15962.0
+make_fake_app "$apps" 'Firefox' org.mozilla.firefox 158.0.1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_not_contains '修正版ちょうどのアプリは要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  (Chrome|Claude Desktop|Firefox) '
+assert_contains '修正版以上のアプリは detail に残す' "$case_dir/output.txt" 'com\.google\.Chrome 156\.0\.8078\.47（.*）— 最低版 156\.0\.8078\.47 以上'
+
+case_dir="$TEST_TMP/apps-firefox-old"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_app "$apps" 'Firefox' org.mozilla.firefox 158.0
+mkdir -p "$apps/Firefox.app/Contents/Resources/defaults/pref"
+printf '%s\n' 'pref("app.update.channel", "release");' > "$apps/Firefox.app/Contents/Resources/defaults/pref/channel-prefs.js"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_contains '通常版の Firefox 158.0 は 158.0.1 より古い WARN' "$case_dir/output.txt" 'WARN  Firefox 158\.0（.*Firefox\.app）は修正版 158\.0\.1 より古い版です（MFSA-2026-106'
+assert_contains 'Firefox の WARN に直し方を含める' "$case_dir/output.txt" 'メニュー → Firefox について で更新'
+
+case_dir="$TEST_TMP/apps-unknown-remedy"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_app "$apps" 'Sample' com.example.sample 1.0.0
+printf 'app:com.example.sample\t*\t2.0.0\tテスト用\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" RH_SECURITY_MINIMUMS="$minimums"
+assert_contains '名前ごとの案内が無いアプリは汎用の直し方を出す' "$case_dir/output.txt" 'WARN  com\.example\.sample 1\.0\.0（.*Sample\.app）は修正版 2\.0\.0 より古い版です（テスト用）。アプリを最新版へ更新してください'
+
+case_dir="$TEST_TMP/plex-stopped"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_pgrep "$fake_bin"
+make_fake_app "$apps" 'Plex Media Server' com.plexapp.plexmediaserver 1.43.2.0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" FAKE_PLEX_RUNNING=0
+assert_contains '動いていない Plex 1.43.2.0 は WARN' "$case_dir/output.txt" 'WARN  Plex Media Server 1\.43\.2\.0（.*）は修正版 1\.43\.3\.10861 より古い版です（Plex2Shell'
+assert_contains 'Plex の WARN に侵害の確認を含める' "$case_dir/output.txt" '侵害されていないかの確認も必要です（Plex の告知）'
+assert_not_contains '動いていない Plex は FAIL にしない' "$case_dir/output.txt" 'FAIL  Plex Media Server'
+
+case_dir="$TEST_TMP/plex-running"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_pgrep "$fake_bin"
+make_fake_app "$apps" 'Plex Media Server' com.plexapp.plexmediaserver 1.43.2.0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" FAKE_PLEX_RUNNING=1
+assert_contains '動いている Plex 1.43.2.0 は FAIL' "$case_dir/output.txt" 'FAIL  Plex Media Server 1\.43\.2\.0（.*）が動いています。修正版 1\.43\.3\.10861 より古い版です'
+
+case_dir="$TEST_TMP/plex-fixed"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_pgrep "$fake_bin"
+make_fake_app "$apps" 'Plex Media Server' com.plexapp.plexmediaserver 1.43.3.10861
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" FAKE_PLEX_RUNNING=1
+assert_not_contains '修正版の Plex は動いていても要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Plex Media Server'
+
+case_dir="$TEST_TMP/brew-curl-old"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.22.0\nopenssl@3 3.6.5\n'
+assert_contains 'Homebrew の curl 8.22.0 は修正版 8.23.0 より古い WARN' "$case_dir/output.txt" 'WARN  Homebrew の curl 8\.22\.0 は修正版 8\.23\.0 より古い版です（CVE-2026-92392.*）。brew upgrade curl'
+assert_not_contains '修正版の openssl@3 3.6.5 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
+
+case_dir="$TEST_TMP/brew-curl-fixed"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.23.0\n'
+assert_not_contains 'Homebrew の curl 8.23.0 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の curl'
+assert_contains '修正版以上の Homebrew の curl は detail に最低版を残す' "$case_dir/output.txt" 'Homebrew の curl 8\.23\.0 — 最低版 8\.23\.0 以上'
+
+case_dir="$TEST_TMP/brew-curl-revision"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.22.0_1\n'
+assert_contains '修正番号つきの版（8.22.0_1）も比べて WARN にする' "$case_dir/output.txt" 'WARN  Homebrew の curl 8\.22\.0_1 は修正版 8\.23\.0 より古い版です'
+
+case_dir="$TEST_TMP/brew-openssl"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir/a" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.6.4\n'
+assert_contains 'Homebrew の openssl@3 3.6.4 は修正版 3.6.5 より古い WARN' "$case_dir/a/output.txt" 'WARN  Homebrew の openssl@3 3\.6\.4 は修正版 3\.6\.5 より古い版です（CVE-2026-84782'
+run_security "$case_dir/b" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.5.8\n'
+assert_contains 'Homebrew の openssl@3 3.5.8 は系列ごとの修正版 3.5.9 で比べる' "$case_dir/b/output.txt" 'WARN  Homebrew の openssl@3 3\.5\.8 は修正版 3\.5\.9 より古い版です'
+run_security "$case_dir/c" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.4.7\n'
+assert_contains 'Homebrew の openssl@3 3.4.7 は系列ごとの修正版 3.4.8 で比べる' "$case_dir/c/output.txt" 'WARN  Homebrew の openssl@3 3\.4\.7 は修正版 3\.4\.8 より古い版です'
+run_security "$case_dir/d" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.5.9\n'
+assert_not_contains 'Homebrew の openssl@3 3.5.9 は要対応に出さない' "$case_dir/d/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
+run_security "$case_dir/e" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.3.9\n'
+assert_not_contains '最低版リストに無い系列（openssl@3 3.3.9）は要対応に出さない' "$case_dir/e/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
+assert_contains '最低版リストに無い系列は detail に未掲載と残す' "$case_dir/e/output.txt" 'Homebrew の openssl@3 3\.3\.9 — この系列は最低版リストに未掲載'
+
+case_dir="$TEST_TMP/brew-no-double"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.22.0\n' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"curl","installed_versions":["8.22.0"],"current_version":"8.23.0"}]}'
+if [ "$(LC_ALL=C grep -cE '^- WARN .*curl' "$case_dir/output.txt")" = "1" ]; then pass 'セキュリティ部品の更新待ちと最低版の WARN を 1件にまとめる'; else fail 'セキュリティ部品の更新待ちと最低版の WARN を 1件にまとめる'; sed -n '1,40p' "$case_dir/output.txt"; fi
+assert_contains 'まとめた WARN に更新待ちの版と最低版の理由を残す' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: curl 8\.22\.0 → 8\.23\.0（修正版 8\.23\.0 未満: CVE-2026-92392'
+
+case_dir="$TEST_TMP/brew-absent-for-minimums"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='curl 8.22.0\n' RH_BREW="$fake_bin/missing-brew"
+assert_not_contains 'brew が無いときは Homebrew の formula の出力をしない' "$case_dir/output.txt" 'Homebrew の curl'
+
+# ---- 0.4.0 後半: GitLab の EOL の文は、表の EOL 行の系列の最低版を使う ----
+
+case_dir="$TEST_TMP/gitlab-eol-from-table"
+fake_bin="$case_dir/fake-bin"
+docker_fake="$fake_bin/docker"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_docker "$docker_fake"
+printf 'gitlab\t19.1\t19.1.9\tテスト\ngitlab\t19.0\t19.0.10\tテスト\ngitlab\tEOL\t19.0\tテスト用の古い系列\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_DOCKER="$docker_fake" RH_SECURITY_MINIMUMS="$minimums" \
+  FAKE_DOCKER_PS='gitlab/gitlab-ce:18.10.8-ce.0\trunning\teol\n' FAKE_DOCKER_IMAGES='gitlab/gitlab-ce:18.10.8-ce.0\n'
+assert_contains 'GitLab の EOL の文は表の EOL 行の系列（19.0）の最低版を使う' "$case_dir/output.txt" 'FAIL  GitLab 18\.10\.8（.*）が動いています。サポート終了の系列です.*で 19\.0\.10 以上へ'
+
+case_dir="$TEST_TMP/gitlab-eol-no-row"
+fake_bin="$case_dir/fake-bin"
+docker_fake="$fake_bin/docker"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_docker "$docker_fake"
+printf 'gitlab\t19.1\t19.1.9\tテスト\ngitlab\tEOL\t19.0\tテスト用の古い系列\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_DOCKER="$docker_fake" RH_SECURITY_MINIMUMS="$minimums" \
+  FAKE_DOCKER_PS='gitlab/gitlab-ce:18.10.8-ce.0\trunning\teol\n' FAKE_DOCKER_IMAGES='gitlab/gitlab-ce:18.10.8-ce.0\n'
+assert_contains 'EOL 行の系列に行が無くても文が空にならない（サポート中の系列へ）' "$case_dir/output.txt" 'FAIL  GitLab 18\.10\.8（.*）が動いています。サポート終了の系列です.*でサポート中の系列へ'
+assert_not_contains 'EOL 行の系列に行が無いとき、空の最低版で「以上へ」と言わない' "$case_dir/output.txt" '）で 以上へ'
+
+# ---- 0.4.0 後半: 侵害パッケージ（全版指定・Python）と GitHub Actions ----
+
+commit_all() {
+  git -C "$REPO_PATH" add -A
+  git -C "$REPO_PATH" commit -q -m 'test: fixture'
+  git -C "$REPO_PATH" push -q
+}
+
+case_dir="$TEST_TMP/denylist-shipped"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" shipped
+printf '{"name":"fixture","version":"1.0.0"}\n' > "$REPO_PATH/package.json"
+printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/ourin-baileys":{"version":"9.9.9"},"node_modules/@apexacc/audit":{"version":"0.0.1"}}}' > "$REPO_PATH/package-lock.json"
+printf 'requests==2.0.0\nlitellm==1.107.0\n' > "$REPO_PATH/requirements.txt"
+printf 'litellm==1.106.2\n' > "$REPO_PATH/requirements-dev.txt"
+commit_all
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '同梱リスト: PhantomSub の名前は任意の版で FAIL' "$case_dir/output.txt" 'FAIL  shipped .*ourin-baileys@9\.9\.9（.*名前だけの一致（全版が対象）・package-lock\.json）'
+assert_contains '同梱リスト: @apexacc/audit は全版 FAIL' "$case_dir/output.txt" 'FAIL  shipped .*@apexacc/audit@0\.0\.1（.*名前だけの一致（全版が対象）'
+assert_contains '同梱リスト: LiteLLM 1.107.0 は requirements.txt で FAIL' "$case_dir/output.txt" 'FAIL  shipped .*pypi:litellm@1\.107\.0（.*版の一致・requirements\.txt）'
+assert_not_contains '同梱リスト: LiteLLM 1.106.2 は当たらない' "$case_dir/output.txt" 'litellm@1\.106\.2'
+
+case_dir="$TEST_TMP/denylist-custom"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" custom
+custom_deny="$case_dir/deny.tsv"
+printf 'somepkg\t*\t名前だけの行\nverpkg\t1.0.0\t版つきの行\npypi:LiteLLM\t1.107.0\tLiteLLM テスト\npypi:Some.Pkg_Name\t*\t正規化テスト\n' > "$custom_deny"
+printf '{"name":"fixture","version":"1.0.0"}\n' > "$REPO_PATH/package.json"
+printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/somepkg":{"version":"3.1.4"},"node_modules/verpkg":{"version":"2.0.0"},"node_modules/SomePkg":{"version":"1.0.0"},"node_modules/litellm":{"version":"1.107.0"}}}' > "$REPO_PATH/package-lock.json"
+printf 'requests==2.0.0\nlitellm==1.107.0\nsome_pkg.name==2.0 ; python_version > "3"\n' > "$REPO_PATH/requirements.txt"
+printf 'litellm==1.106.2\n' > "$REPO_PATH/requirements-old.txt"
+printf '[[package]]\nname = "litellm"\nversion = "1.107.0"\n\n[[package]]\nversion = "1.0"\n\n[package.dependencies]\nname = "some-pkg-name"\n' > "$REPO_PATH/uv.lock"
+printf '[[package]]\nname = "LiteLLM"\nversion = "1.107.0"\ndescription = "x"\n\n[[package]]\nname = "other"\nversion = "1.107.0"\n' > "$REPO_PATH/poetry.lock"
+printf '%s\n' '{"default":{"litellm":{"version":"==1.107.0"}},"develop":{"verpkg":{"version":"==1.0.0"}}}' > "$REPO_PATH/Pipfile.lock"
+commit_all
+RH_DENYLIST="$custom_deny" run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'npm の * 行は任意の版に当たる' "$case_dir/output.txt" 'FAIL  custom .*somepkg@3\.1\.4（名前だけの行・名前だけの一致（全版が対象）・package-lock\.json）'
+assert_not_contains 'npm の版つきの行は版違いに当たらない' "$case_dir/output.txt" 'verpkg@2\.0\.0'
+assert_not_contains 'npm の名前は正規化しない（大文字小文字違いは当たらない）' "$case_dir/output.txt" 'SomePkg@1\.0\.0'
+assert_contains 'pypi: 行は requirements.txt の litellm==1.107.0 に当たる（名前の正規化）' "$case_dir/output.txt" 'FAIL  custom .*pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・requirements\.txt）'
+assert_contains 'pypi: 行は uv.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・uv\.lock）'
+assert_contains 'pypi: 行は poetry.lock に当たる（名前が LiteLLM でも）' "$case_dir/output.txt" 'pypi:LiteLLM@1\.107\.0（LiteLLM テスト・版の一致・poetry\.lock）'
+assert_contains 'pypi: 行は Pipfile.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・Pipfile\.lock）'
+assert_contains 'pypi: の * 行は PEP 503 の正規化で当たる（Some.Pkg_Name と some_pkg.name）' "$case_dir/output.txt" 'pypi:some_pkg\.name@2\.0（正規化テスト・名前だけの一致（全版が対象）・requirements\.txt）'
+assert_not_contains 'litellm==1.106.2 は当たらない' "$case_dir/output.txt" 'litellm@1\.106\.2|requirements-old\.txt'
+assert_not_contains 'toml ロックの下位の表（[package.dependencies]）の name は読まない' "$case_dir/output.txt" 'pypi:some-pkg-name@'
+assert_not_contains 'pypi: 行は npm の package-lock.json（npm の litellm）に当たらない' "$case_dir/output.txt" 'litellm@1\.107\.0（[^）]*）[^）]*package-lock\.json'
+
+case_dir="$TEST_TMP/denylist-untracked"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" untracked
+printf 'litellm==1.107.0\n' > "$REPO_PATH/requirements.txt"
+printf '[[package]]\nname = "litellm"\nversion = "1.107.0"\n' > "$REPO_PATH/uv.lock"
+printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/keyv":{"version":"6.0.0"}}}' > "$REPO_PATH/package-lock.json"
+run_health "$case_dir" "$case_dir/root with space"
+assert_not_contains '追跡外の Python のファイルは見ない' "$case_dir/output.txt" 'litellm'
+assert_contains 'ルートの package-lock.json は今までどおり追跡外でも見る' "$case_dir/output.txt" 'FAIL  untracked .*keyv@6\.0\.0'
+
+case_dir="$TEST_TMP/actions-bad"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" actionsrepo
+mkdir -p "$REPO_PATH/.github/workflows"
+printf 'name: ci\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions-cool/issues-helper@v3\n      # - uses: actions-cool/maintain-one-comment@v1\n' > "$REPO_PATH/.github/workflows/ci.yml"
+printf 'name: deploy\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - name: x\n        uses: "Actions-Cool/Issues-Helper/sub@0123abcd"\n' > "$REPO_PATH/.github/workflows/deploy.yaml"
+commit_all
+printf 'jobs:\n  c:\n    steps:\n      - uses: actions-cool/maintain-one-comment@v1\n' > "$REPO_PATH/.github/workflows/untracked.yml"
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'uses: actions-cool/issues-helper@v3 は FAIL' "$case_dir/output.txt" 'FAIL  actionsrepo — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。workflow から外し、そのリポの secret を入れ替えてください（.*ci\.yml）'
+assert_contains '大文字小文字違い・下のパスつきの Actions-Cool/Issues-Helper/sub@sha も FAIL' "$case_dir/output.txt" 'FAIL  actionsrepo — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。.*deploy\.yaml'
+assert_not_contains 'コメントアウトした行と追跡外の workflow は見ない' "$case_dir/output.txt" 'maintain-one-comment'
+assert_not_contains 'ほかの action（actions/checkout）は FAIL にしない' "$case_dir/output.txt" 'GitHub Action（actions/checkout）'
+
+case_dir="$TEST_TMP/actions-clean"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" cleanactions
+mkdir -p "$REPO_PATH/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n      - uses: ./local-action\n      - uses: docker://alpine:3\n' > "$REPO_PATH/.github/workflows/ci.yml"
+commit_all
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'ほかの action だけのリポは要対応0件' "$case_dir/output.txt" '要対応: FAIL 0件 / WARN 0件'
+
+case_dir="$TEST_TMP/actions-custom-table"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" customactions
+mkdir -p "$REPO_PATH/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - uses: acme/evil@v1\n' > "$REPO_PATH/.github/workflows/ci.yml"
+commit_all
+printf '# 見出し\nacme/evil\tテスト用の理由\n' > "$case_dir/actions.tsv"
+RH_ACTIONS_DENYLIST="$case_dir/actions.tsv" run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'RH_ACTIONS_DENYLIST で表を差し替えられる' "$case_dir/output.txt" 'FAIL  customactions — 侵害された GitHub Action（acme/evil）を使っています。.*テスト用の理由'
+RH_ACTIONS_DENYLIST="$case_dir/missing.tsv" run_health "$case_dir" "$case_dir/root with space"
+assert_contains '表が無いときは照合が動いていない FAIL' "$case_dir/output.txt" 'FAIL  customactions — GitHub Actions 照合が動いていません（同梱リスト不足）'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

@@ -1,0 +1,9 @@
+# 侵害された GitHub Actions の一覧です。
+# 形式: owner/repo<TAB>理由（owner/repo の大小文字は区別しません。その下のパスや @ 以降の版は見ません）
+# 出典を確認できた項目だけを追加し、過去の項目は削除しません。
+
+# Mini Shai-Hulud の再有効化（2026-09-16〜09-25、Socket）
+# 2026-05 に侵害されて無効化された 2 つが 09-16 に再び使える状態になり、リリースタグが悪性のコードを指したままでした。09-25 に再び無効化されています。
+# https://www.socket.dev/blog/mini-shai-hulud-actions
+actions-cool/issues-helper	Mini Shai-Hulud で侵害（リリースタグが悪性のコードを指す・2026-09 に再有効化）
+actions-cool/maintain-one-comment	Mini Shai-Hulud で侵害（リリースタグが悪性のコードを指す・2026-09 に再有効化）

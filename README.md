@@ -1,6 +1,6 @@
 # repo-health-kit
 
-Mac にある git リポジトリと、Mac のセキュリティ（Homebrew の部品・PHP・Node.js・証明書・macOS のアップデート）を毎朝点検し、対応が必要なことをデスクトップ通知とメールで知らせる道具です。自動で直すのは、作業中の変更がなく fast-forward できる同期と、証明書リスト（ca-certificates）の更新など、安全を確認できる操作だけです。dirty、stash、依存パッケージの脆弱性は自動で変更しません。Node や Python などの部品の更新は、設定で有効にしたときだけ行います。
+Mac にある git リポジトリと、Mac のセキュリティ（Homebrew の部品・PHP・Node.js・Java・macOS とアプリの版・証明書・macOS のアップデート）を毎朝点検し、対応が必要なことをデスクトップ通知とメールで知らせる道具です。自動で直すのは、作業中の変更がなく fast-forward できる同期と、証明書リスト（ca-certificates）の更新など、安全を確認できる操作だけです。dirty、stash、依存パッケージの脆弱性は自動で変更しません。Node や Python などの部品の更新は、設定で有効にしたときだけ行います。
 
 五次元経営株式会社が社内で使っている点検の仕組みから、クライアントが Mac 1台で使える部分を切り出しました。利用状況を外部へ送るテレメトリーはありません。点検のために接続する先は「[Mac のセキュリティ点検](#mac-のセキュリティ点検020)」にまとめています。
 
@@ -57,22 +57,37 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 - **Node.js の安全修正**（2026-10-21 公表）。修正版は 26.12.1 / 24.22.1 / 22.23.4 です。重要度 High の4件には、証明書の相手確認（ホスト名の確認）をすり抜けられる問題と、圧縮データ（Brotli）の処理で外から命令を実行されうる問題が含まれます。
 - **eMudhra の中間 CA 8件の秘密鍵の漏洩**（2026-10-20 公表）。ブラウザ（Chrome・Safari など）と macOS 本体は対策済みです。一方で、curl・Node・Python などのコマンドラインの道具は、証明書リストを更新するまで、漏洩した証明書を信頼したままになります。
 
+0.4.0 では、2026年9月下旬〜10月22日に公表されたものから、Mac で確かめられるものを足しました。修正版はどれも、配布元や CISA・NVD などの一次資料で確かめた値です。
+
+- **GitLab**（CVE-2026-110264、CVSS 10.0。2026-10-21 公表）。修正版は 19.5.1 / 19.4.3 / 19.3.6 / 19.2.9 / 19.1.9 / 19.0.10 / 18.11.13 です。
+- **Java**（Oracle の 2026年10月の定例更新。Java SE に 55件）。修正版は 8u511（OpenJDK 系は 8u512）/ 11.0.33 / 17.0.21 / 21.0.13 / 25.0.5 / 27.0.1 です。
+- **macOS**（CVE-2026-86950。実際に悪用されたと Apple が公表）。修正版は Sequoia 15.8.1 / Tahoe 26.7.1 です。
+- **Plex Media Server**（通称 Plex2Shell。4件とも悪用が確認済み）。修正版は 1.43.3.10861 です。
+- **Claude Desktop・Claude Code・Chrome・Firefox・Homebrew の curl と OpenSSL** の安全修正。
+- **侵害されたパッケージと GitHub Actions**（LiteLLM・Tensorlake・MALFEX・PhantomSub など、配布物そのものに悪意のあるコードが入っていたもの）。
+
 ### 何を見るか
 
 1. **Homebrew のセキュリティ部品の更新待ち** — 証明書リスト（ca-certificates）、openssl、curl、git、openssh、node、python、php など、セキュリティに関わる部品に更新が出ていないかを見ます。対象の一覧は同梱の `config/security-packages.txt` です。Homebrew を使っていない Mac では、この点検は行いません。
-2. **PHP と Node.js の最低版** — 表は同梱の `config/security-minimums.tsv` です。
+2. **部品とアプリの最低版** — 表は同梱の `config/security-minimums.tsv` です。
    - **PHP**: Mac にある `php` と `php-fpm` の版が、上の修正版より古くないか、サポートが終わった系列（8.1 以前）でないかを見ます。PHP がサーバーとして動いている（接続を待ち受けている）ときは FAIL、そうでなければ WARN です。Apache は PHP を読み込んでいるときだけ数えます。管理者権限で動いているサーバーは見えないことがあるため、その場合は WARN になります。
    - **Node.js**: Mac にある `node` の版が、上の修正版より古くないか、サポートが終わった系列（21 以前・23・25）でないかを見ます。Homebrew の `node@24` のように普段の呼び出し先に入っていないものや、nvm で入れたものも見ます。Node.js は WARN です。直し方は入れ方に合わせて出します（例: `brew upgrade node@24`）。
+   - **Java**: Mac にある JDK（`/Library/Java/JavaVirtualMachines`、Homebrew の `openjdk`、SDKMAN）の版を、JDK に同梱の `release` ファイルから読みます。`java` コマンドは動かしません。修正版より古いもの、サポートが終わった系列（26 や 22〜24 などの非 LTS）は WARN です。
+   - **GitLab**: この Mac の Docker で `gitlab/gitlab-ce`・`gitlab/gitlab-ee` を動かしている場合に、イメージの版を見ます。修正版より古いものが動いていれば FAIL、止まっているだけなら WARN です。リポジトリの置き場が自社の GitLab らしいときは、サーバーの更新を確かめるよう「参考」に1回だけ出します。
+   - **macOS**: 修正版より古い版、修正版が出ていない系列（Sonoma 14 以前）は WARN です。
+   - **アプリ**: `/Applications` などにある Claude・Chrome・Firefox・Plex Media Server の版を、アプリの中の `Info.plist` から読みます。アプリは起動しません。修正版より古ければ WARN、Plex Media Server だけは動いていれば FAIL です。Firefox ESR は対象外です。
+   - **Claude Code と Homebrew の curl・OpenSSL**: 修正版より古ければ WARN です。Homebrew の「更新待ち」の WARN と同じものは、1件にまとめます。
 3. **composer の依存** — `composer.lock` があるリポジトリで `composer audit` を実行し、本番依存の脆弱性を見ます。npm の依存と同じく、critical/high は FAIL です。
 4. **失効済みの証明書を信頼していないか** — Node、curl、python3 が、漏洩した証明書を使った確認用のテスト先へつながってしまうかを試します。つながった道具は、その証明書をまだ信頼しているということです。
 5. **macOS のアップデート待ち** — macOS やセキュリティ関連のアップデートが出ていないかを見ます。
 6. **kit 自身の新しい版** — 公開リポジトリの版番号と比べ、新しい版が出ていれば知らせます。版が新しくなると、点検の中身（テスト先や最低版の表）も新しくなるためです。
+7. **侵害されたパッケージと GitHub Actions**（リポジトリごと） — 同梱の `config/pkg-denylist.tsv` と照らし合わせ、侵害が確認された npm・PyPI のパッケージが lock ファイルに入っていれば FAIL です。版を問わず名前だけで当たるもの（`*`）と、Python の lock（`requirements*.txt`・`poetry.lock`・`uv.lock`・`Pipfile.lock`）にも対応しました。`.github/workflows` で侵害された GitHub Actions（`config/actions-denylist.tsv`）を使っていれば、これも FAIL です。
 
 ### 何を自動で直すか
 
 - **証明書リスト（ca-certificates）** は、Homebrew に更新が出ていれば、初期設定で自動更新します。データだけの部品なので、既定で自動にしています。止める場合は `RH_AUTOFIX_CA_CERTS=0` にします。
 - **それ以外のセキュリティ部品**（node、python、openssl、curl、php など）は、`RH_AUTOFIX_SECURITY=1` のときだけ、まとめて `brew upgrade` します。Node や Python の版が上がると、開発中のアプリの動きが変わることがあるため、初期値は 0（自動更新しない）です。0 のままなら、更新待ちの部品は WARN 1件にまとめて届きます。
-- PHP と Node.js の最低版の点検、composer の依存、macOS のアップデートでは、自動では直しません（Homebrew の php と node は、`RH_AUTOFIX_SECURITY=1` のとき上の更新に含まれます）。WARN や FAIL の文に、直し方の手がかりを添えます。
+- 最低版の点検（PHP・Node.js・Java・GitLab・macOS・アプリなど）、composer の依存、macOS のアップデートでは、自動では直しません（Homebrew の php と node は、`RH_AUTOFIX_SECURITY=1` のとき上の更新に含まれます）。WARN や FAIL の文に、直し方の手がかりを添えます。
 - 自動更新では、名指しした部品だけを更新します。その部品に依存する別の部品（たとえば Node や Python）を、Homebrew の既定の動きでまとめて更新することはしません。
 - 自動で更新したものは、レポートの「自動で直したもの」に載ります。自動更新に失敗したときは WARN でお知らせします。
 
@@ -89,8 +104,8 @@ Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=
 
 メールは、FAIL か WARN があるときに届きます。
 
-- `FAIL（赤）` は今日中に確認する目安です。例: detached HEAD、作業途中の merge、平文シークレット、本番依存の critical/high（npm・composer）、侵害パッケージ、サーバーとして動いている古い PHP です。
-- `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
+- `FAIL（赤）` は今日中に確認する目安です。例: detached HEAD、作業途中の merge、平文シークレット、本番依存の critical/high（npm・composer）、侵害パッケージ、侵害された GitHub Actions、サーバーとして動いている古い PHP・GitLab・Plex Media Server です。
+- `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
 - 「作業中」「同期待ち」は赤黄の対象外です。単発の dirty を異常とは決めつけません。
 - 「未検査」は異常なしを意味しません。npm、Homebrew、ネットワークの状態を確認して再実行してください。
 - 「参考」は、ローカルのレポート（`repo-health-latest.md`）にだけ載り、メールの要対応には数えません。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。
