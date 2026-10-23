@@ -67,6 +67,7 @@ fi
 : "${RH_AUTOFIX_CLI:=0}"
 : "${RH_FETCH_FAIL_DAYS:=2}"
 : "${RH_DIRTY_DAYS_WARN:=3}"
+: "${RH_WARN_NONGIT:=1}"
 : "${RH_GIT_MB_WARN:=1000}"
 : "${RH_GIT_GROWTH_MB:=100}"
 : "${RH_STALE_BEHIND_THRESHOLD:=20}"
@@ -2163,8 +2164,32 @@ for root in "${RH_ROOTS[@]+"${RH_ROOTS[@]}"}"; do
   find "$root" -mindepth 1 -maxdepth 1 -type d -print0 >> "$REPO_LIST"
 done
 
+# git 管理外のフォルダは点検できないので、黙って飛ばさずに知らせる。
+# 空のフォルダと隠しフォルダは参考扱い、RH_NONGIT_IGNORE に書いた名前も参考扱いにする。
+note_non_git_dir() {
+  local dir="$1" name ignored
+  name="$(basename "$dir")"
+  case "$name" in .*) return 0;; esac
+  [ "$RH_WARN_NONGIT" = "1" ] || return 0
+  [ "$RH_SECURITY_ONLY" = "1" ] && return 0
+  if [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -not -name '.DS_Store' -print -quit 2>/dev/null)" ]; then
+    NOTES[${#NOTES[@]}]="$(clean_text "$name") — 空のフォルダ（git 管理外）"
+    return 0
+  fi
+  for ignored in "${RH_NONGIT_IGNORE[@]+"${RH_NONGIT_IGNORE[@]}"}"; do
+    if [ "$ignored" = "$name" ]; then
+      NOTES[${#NOTES[@]}]="$(clean_text "$name") — git 管理外のフォルダ（RH_NONGIT_IGNORE により参考扱い）"
+      return 0
+    fi
+  done
+  add_warning "$name — git 管理外のフォルダです。点検の対象になっていません（git init して remote を設定するか、別の場所へ移すか、RH_NONGIT_IGNORE に名前を加えてください）"
+}
+
 while IFS= read -r -d '' repo; do
-  [ -e "$repo/.git" ] || continue
+  if [ ! -e "$repo/.git" ]; then
+    note_non_git_dir "$repo"
+    continue
+  fi
   repo_count=$((repo_count + 1))
   if [ "$RH_SECURITY_ONLY" = "1" ]; then
     check_repo_security_only "$repo"

@@ -206,13 +206,26 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..188\n'
+printf '1..192\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
 make_remote_repo "$case_dir" '見本 リポ'
 run_health "$case_dir" "$case_dir/root with space"
 assert_contains 'clean なリポは要対応0件' "$case_dir/output.txt" '要対応: FAIL 0件 / WARN 0件'
+
+case_dir="$TEST_TMP/non-git"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" gitrepo
+mkdir -p "$case_dir/root with space/素材フォルダ" "$case_dir/root with space/empty-dir" "$case_dir/root with space/.hidden"
+printf 'memo\n' > "$case_dir/root with space/素材フォルダ/memo.txt"
+printf 'x\n' > "$case_dir/root with space/.hidden/x"
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'git 管理外のフォルダは WARN' "$case_dir/output.txt" 'WARN  素材フォルダ — git 管理外のフォルダです'
+assert_contains '空のフォルダは参考' "$case_dir/output.txt" 'empty-dir — 空のフォルダ'
+assert_not_contains '隠しフォルダは対象外' "$case_dir/output.txt" '\.hidden'
+RH_WARN_NONGIT=0 run_health "$case_dir" "$case_dir/root with space"
+assert_not_contains 'RH_WARN_NONGIT=0 なら知らせない' "$case_dir/output.txt" 'git 管理外のフォルダ'
 
 case_dir="$TEST_TMP/detached"
 mkdir -p "$case_dir"
