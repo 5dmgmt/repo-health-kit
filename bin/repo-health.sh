@@ -55,6 +55,7 @@ RH_ENV_SKIP_CLI_SET="${RH_SKIP_CLI+x}"; RH_ENV_SKIP_CLI_VALUE="${RH_SKIP_CLI-}"
 RH_ENV_SKIP_SECURITY_SET="${RH_SKIP_SECURITY+x}"; RH_ENV_SKIP_SECURITY_VALUE="${RH_SKIP_SECURITY-}"
 RH_ENV_SKIP_FETCH_SET="${RH_SKIP_FETCH+x}"; RH_ENV_SKIP_FETCH_VALUE="${RH_SKIP_FETCH-}"
 RH_ENV_NO_DESKTOP_SET="${RH_NO_DESKTOP+x}"; RH_ENV_NO_DESKTOP_VALUE="${RH_NO_DESKTOP-}"
+RH_ENV_SECURITY_ONLY_SET="${RH_SECURITY_ONLY+x}"; RH_ENV_SECURITY_ONLY_VALUE="${RH_SECURITY_ONLY-}"
 if [ -z "$RH_ENV_ROOTS_SET" ]; then
   RH_ROOTS=("$HOME/Plugins")
 fi
@@ -81,6 +82,7 @@ fi
 : "${RH_KIT_UPDATE_CHECK:=1}"
 : "${RH_NOMAIL:=0}"
 : "${RH_NO_DESKTOP:=0}"
+: "${RH_SECURITY_ONLY:=0}"
 
 RH_CONFIG_FILE="${RH_CONFIG_FILE:-$HOME/.config/repo-health-kit/config.sh}"
 if [ -f "$RH_CONFIG_FILE" ]; then
@@ -94,8 +96,10 @@ fi
 [ -z "$RH_ENV_SKIP_SECURITY_SET" ] || RH_SKIP_SECURITY="$RH_ENV_SKIP_SECURITY_VALUE"
 [ -z "$RH_ENV_SKIP_FETCH_SET" ] || RH_SKIP_FETCH="$RH_ENV_SKIP_FETCH_VALUE"
 [ -z "$RH_ENV_NO_DESKTOP_SET" ] || RH_NO_DESKTOP="$RH_ENV_NO_DESKTOP_VALUE"
+[ -z "$RH_ENV_SECURITY_ONLY_SET" ] || RH_SECURITY_ONLY="$RH_ENV_SECURITY_ONLY_VALUE"
 
 case "$RH_MAIL_METHOD" in resend|none) ;; *) fatal "RH_MAIL_METHOD は resend または none を指定してください";; esac
+case "$RH_SECURITY_ONLY" in 0|1) ;; *) fatal "RH_SECURITY_ONLY は 0 または 1 を指定してください";; esac
 is_uint "$RH_AUTOFIX_PULL" || fatal "RH_AUTOFIX_PULL は0以上の整数で指定してください"
 is_uint "$RH_AUTOFIX_CLI" || fatal "RH_AUTOFIX_CLI は0以上の整数で指定してください"
 is_uint "$RH_FETCH_FAIL_DAYS" || fatal "RH_FETCH_FAIL_DAYS は0以上の整数で指定してください"
@@ -688,6 +692,13 @@ check_repo() {
   scan_denylist "$repo" "$repo_name"
   scan_actions_denylist "$repo" "$repo_name"
   add_detail "$repo_name — fetch=$fetch branch=$branch ahead=$ahead behind=$behind dirty=$dirty stash=$stash state=$state"
+}
+
+check_repo_security_only() {
+  local repo="$1" repo_name
+  repo_name="$(clean_text "$(basename -- "$repo")")"
+  scan_denylist "$repo" "$repo_name"
+  scan_actions_denylist "$repo" "$repo_name"
 }
 
 current_version() {
@@ -2112,6 +2123,7 @@ PY
 }
 
 test_mail() {
+  local test_subject
   if [ "$RH_NOMAIL" = "1" ]; then
     printf 'mail: RH_NOMAIL=1 のため送信しない\n'
     return 0
@@ -2120,7 +2132,12 @@ test_mail() {
     printf 'mail: none のため送信しない\n'
     return 0
   fi
-  if send_resend '[repo-health] テスト送信' 'repo-health-kit のテスト送信です。'; then
+  if [ "$RH_SECURITY_ONLY" = "1" ]; then
+    test_subject='[mac-security] テスト送信'
+  else
+    test_subject='[repo-health] テスト送信'
+  fi
+  if send_resend "$test_subject" 'repo-health-kit のテスト送信です。'; then
     printf 'mail: テスト送信に成功しました\n'
   else
     printf 'mail: テスト送信に失敗しました（キー・宛先・ネットワークを確認してください）\n' >&2
@@ -2149,14 +2166,22 @@ done
 while IFS= read -r -d '' repo; do
   [ -e "$repo/.git" ] || continue
   repo_count=$((repo_count + 1))
-  check_repo "$repo"
+  if [ "$RH_SECURITY_ONLY" = "1" ]; then
+    check_repo_security_only "$repo"
+  else
+    check_repo "$repo"
+  fi
 done < "$REPO_LIST"
 
 if [ "$repo_count" -eq 0 ]; then
-  add_failure "対象リポが0件です（RH_ROOTS の設定を確認してください）"
+  if [ "$RH_SECURITY_ONLY" = "1" ]; then
+    NOTES[${#NOTES[@]}]="リポが0件のため、侵害パッケージの照合は未検査"
+  else
+    add_failure "対象リポが0件です（RH_ROOTS の設定を確認してください）"
+  fi
 fi
 
-check_cli_tools
+[ "$RH_SECURITY_ONLY" = "1" ] || check_cli_tools
 check_mac_security
 
 fail_count=${#FAILURES[@]}
@@ -2164,7 +2189,11 @@ warn_count=${#WARNINGS[@]}
 generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
 
 {
-  printf '# リポジトリ・ヘルスチェック\n\n'
+  if [ "$RH_SECURITY_ONLY" = "1" ]; then
+    printf '# Mac のセキュリティ点検\n\n'
+  else
+    printf '# リポジトリ・ヘルスチェック\n\n'
+  fi
   printf '_生成: %s_\n\n' "$generated"
   printf '**要対応: FAIL %s件 / WARN %s件**\n\n' "$fail_count" "$warn_count"
   printf '## ① 要対応\n\n'
@@ -2176,11 +2205,15 @@ generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
   fi
   printf '\n## ② 自動で直したもの\n\n'
   if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf 'なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf -- '- %s\n' "$item"; done; fi
-  printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ）\n\n'
-  printf -- '- 作業中: %s件\n- 同期待ち: %s件\n- CLI 更新あり: %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
-  for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$item"; done
-  for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$item"; done
-  for item in "${CLI_UPDATES[@]+"${CLI_UPDATES[@]}"}"; do printf -- '- %s\n' "$item"; done
+  if [ "$RH_SECURITY_ONLY" = "1" ]; then
+    printf '\n## ③ 参考（Mac のセキュリティ）\n\n'
+  else
+    printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ）\n\n'
+    printf -- '- 作業中: %s件\n- 同期待ち: %s件\n- CLI 更新あり: %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
+    for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$item"; done
+    for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$item"; done
+    for item in "${CLI_UPDATES[@]+"${CLI_UPDATES[@]}"}"; do printf -- '- %s\n' "$item"; done
+  fi
   for item in "${NOTES[@]+"${NOTES[@]}"}"; do printf -- '- %s\n' "$item"; done
   printf "\n## ④ 全文の場所\n\n- 最新: \`%s\`\n- 履歴: \`%s\`\n" "$REPORT" "$LOG_FILE"
   printf '\n---\n\n## 点検詳細\n\n'
@@ -2204,7 +2237,11 @@ if [ $((fail_count + warn_count)) -gt 0 ]; then
   else
     hostname_short="$(hostname -s 2>/dev/null || printf 'Mac')"
     hostname_short="$(clean_text "$hostname_short")"
-    subject="[repo-health] FAIL ${fail_count}件 / WARN ${warn_count}件 — ${hostname_short}"
+    if [ "$RH_SECURITY_ONLY" = "1" ]; then
+      subject="[mac-security] FAIL ${fail_count}件 / WARN ${warn_count}件 — ${hostname_short}"
+    else
+      subject="[repo-health] FAIL ${fail_count}件 / WARN ${warn_count}件 — ${hostname_short}"
+    fi
     mail_body="$TMP_DIR/mail-body.txt"
     {
       printf '■ 要対応\n'
@@ -2212,7 +2249,11 @@ if [ $((fail_count + warn_count)) -gt 0 ]; then
       for item in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do printf '  - WARN  %s\n' "$item"; done
       printf '\n■ 自動で直したもの\n'
       if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf '  なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf '  - %s\n' "$item"; done; fi
-      printf '\n■ 参考\n  作業中 %s件 / 同期待ち %s件 / CLI 更新あり %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
+      if [ "$RH_SECURITY_ONLY" = "1" ]; then
+        printf '\n■ 参考\n'
+      else
+        printf '\n■ 参考\n  作業中 %s件 / 同期待ち %s件 / CLI 更新あり %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
+      fi
       printf '\n■ 全文の場所\n  %s\n' "$REPORT"
     } > "$mail_body"
     if send_resend "$subject" "$(sed -n '1,$p' "$mail_body")"; then

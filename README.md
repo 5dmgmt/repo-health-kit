@@ -145,9 +145,10 @@ RH_AUTOFIX_CLI=0
 
 CLI の自動更新は初期状態で無効です。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
 
-Mac のセキュリティ点検の設定は次の6つです。値は初期値です。設定ファイルに書いていない項目は、この初期値で動きます。変えたい項目だけを書き足してください。
+Mac のセキュリティ点検の設定は次の7つです。値は初期値です。設定ファイルに書いていない項目は、この初期値で動きます。変えたい項目だけを書き足してください。
 
 ```bash
+RH_SECURITY_ONLY=0        # 1 で Mac のセキュリティと、侵害パッケージ・GitHub Actions の照合だけを行います（0.4.2〜）
 RH_SKIP_SECURITY=0        # 1 で Mac のセキュリティ点検を丸ごと止めます
 RH_AUTOFIX_CA_CERTS=1     # 証明書リスト ca-certificates を Homebrew で自動更新します。0 で止めます
 RH_AUTOFIX_SECURITY=0     # 1 で node・python・openssl・php などのセキュリティ部品も自動更新します
@@ -155,6 +156,8 @@ RH_TLS_PROBE=1            # 0 で証明書の点検（テスト先への接続�
 RH_SKIP_SOFTWAREUPDATE=0  # 1 で macOS のアップデート確認を止めます
 RH_KIT_UPDATE_CHECK=1     # 0 で kit の新しい版の確認を止めます
 ```
+
+`RH_SECURITY_ONLY=1` は、リポジトリの同期や依存の監査を別の仕組みで見ている場合に使います。このとき、リポジトリの fetch・未コミット・同期待ち・npm/composer audit・CLI の更新確認は行いません。レポートの見出しは「Mac のセキュリティ点検」、メールの件名は `[mac-security]` になります。
 
 本番依存の critical/high を調査のうえ期限付きで据え置く場合は、`~/.config/repo-health-kit/vuln-allow.tsv` に次の形式で追記します。npm と composer の両方に効きます。初期状態は空です。
 

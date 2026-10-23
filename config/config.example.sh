@@ -6,6 +6,9 @@
 # 点検する親ディレクトリです。直下の git リポジトリを点検します。複数指定できます。
 RH_ROOTS=("$HOME/Plugins")
 
+# リポの侵害パッケージ・Actions と Mac のセキュリティだけを点検する場合は 1 にします。
+RH_SECURITY_ONLY=0
+
 # メール送信方法です。resend または none を指定します。
 RH_MAIL_METHOD="none"
 

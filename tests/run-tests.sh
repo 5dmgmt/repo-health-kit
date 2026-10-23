@@ -80,6 +80,19 @@ run_security() {
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
+run_security_only() {
+  local case_dir="$1" root="$2" output
+  shift 2
+  output="$case_dir/output.txt"
+  mkdir -p "$case_dir/home" "$root"
+  env HOME="$case_dir/home" \
+    RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SECURITY_ONLY=1 RH_SKIP_SECURITY=1 RH_SKIP_CLI=0 RH_SKIP_FETCH=0 \
+    RH_AUTOFIX_PULL=1 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+}
+
 make_fake_brew() {
   local fake_bin="$1"
   mkdir -p "$fake_bin"
@@ -193,7 +206,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..171\n'
+printf '1..188\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -890,7 +903,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.1 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.2 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"
@@ -1311,6 +1324,86 @@ RH_ACTIONS_DENYLIST="$case_dir/actions.tsv" run_health "$case_dir" "$case_dir/ro
 assert_contains 'RH_ACTIONS_DENYLIST で表を差し替えられる' "$case_dir/output.txt" 'FAIL  customactions — 侵害された GitHub Action（acme/evil）を使っています。.*テスト用の理由'
 RH_ACTIONS_DENYLIST="$case_dir/missing.tsv" run_health "$case_dir" "$case_dir/root with space"
 assert_contains '表が無いときは照合が動いていない FAIL' "$case_dir/output.txt" 'FAIL  customactions — GitHub Actions 照合が動いていません（同梱リスト不足）'
+
+# ---- 0.4.2: Mac のセキュリティ点検だけを動かす設定 ----
+
+case_dir="$TEST_TMP/security-only-state"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" securedirty
+git clone -q "$case_dir/origin.git" "$case_dir/updater" 2>/dev/null
+git -C "$case_dir/updater" config user.name tester
+git -C "$case_dir/updater" config user.email tester@example.invalid
+printf 'remote change\n' >> "$case_dir/updater/README.md"
+git -C "$case_dir/updater" add README.md
+git -C "$case_dir/updater" commit -q -m 'test: remote change'
+git -C "$case_dir/updater" push -q
+git -C "$REPO_PATH" fetch -q origin
+printf 'local change\n' >> "$REPO_PATH/README.md"
+: > "$case_dir/git.trace"
+run_security_only "$case_dir" "$case_dir/root with space" GIT_TRACE="$case_dir/git.trace"
+assert_not_contains 'security-only は dirty・behind の WARN を出さない' "$case_dir/output.txt" 'WARN  securedirty .*dirty|WARN  securedirty .*behind'
+assert_contains 'security-only の見出しは Mac のセキュリティ点検' "$case_dir/output.txt" '^# Mac のセキュリティ点検$'
+assert_not_contains 'security-only は git fetch を呼ばない' "$case_dir/git.trace" 'git fetch| fetch '
+assert_not_contains 'security-only の参考にリポ・CLI の件数行を出さない' "$case_dir/output.txt" '^- (作業中|同期待ち|CLI 更新あり):'
+
+case_dir="$TEST_TMP/security-only-denylist"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" securitydeny
+printf '{"name":"fixture","version":"1.0.0"}\n' > "$REPO_PATH/package.json"
+printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/keyv":{"version":"6.0.0"}}}' > "$REPO_PATH/package-lock.json"
+commit_all
+run_security_only "$case_dir" "$case_dir/root with space"
+assert_contains 'security-only でも侵害パッケージを FAIL にする' "$case_dir/output.txt" 'FAIL  securitydeny .*keyv@6\.0\.0'
+
+case_dir="$TEST_TMP/security-only-actions"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" securityactions
+mkdir -p "$REPO_PATH/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions-cool/issues-helper@v3\n' > "$REPO_PATH/.github/workflows/ci.yml"
+commit_all
+run_security_only "$case_dir" "$case_dir/root with space"
+assert_contains 'security-only でも侵害 Actions を FAIL にする' "$case_dir/output.txt" 'FAIL  securityactions — 侵害された GitHub Action（actions-cool/issues-helper）'
+
+case_dir="$TEST_TMP/security-only-venv"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+repo="$case_dir/root/fixture"
+venv="$repo/.venv"
+site="$venv/lib/python3.14/site-packages"
+mkdir -p "$repo/.git" "$venv/bin"
+printf 'home = /fixture\n' > "$venv/pyvenv.cfg"
+make_python_site "$site" 26.2.1 2026.10.18
+make_exit_command "$venv/bin/python" 0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_ONLY=1
+assert_contains 'security-only でもリポの venv の古い pip を WARN にする' "$case_dir/output.txt" 'WARN  Python（fixture/\.venv）.*pip 26\.2\.1'
+
+case_dir="$TEST_TMP/security-only-empty"
+mkdir -p "$case_dir/empty"
+run_security_only "$case_dir" "$case_dir/empty"
+assert_not_contains 'security-only は対象リポ0件を FAIL にしない' "$case_dir/output.txt" 'FAIL  対象リポが0件'
+assert_contains 'security-only はリポ0件で侵害パッケージ未検査を NOTES に出す' "$case_dir/output.txt" 'リポが0件のため、侵害パッケージの照合は未検査'
+assert_not_contains 'security-only は CLI 更新確認の未検査 NOTES を出さない' "$case_dir/output.txt" 'CLI 更新確認は .*未検査'
+assert_contains 'security-only は空のルートでも専用見出しを出す' "$case_dir/output.txt" '^# Mac のセキュリティ点検$'
+
+case_dir="$TEST_TMP/security-only-invalid"
+mkdir -p "$case_dir/home"
+HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/no-config.sh" RH_SECURITY_ONLY=2 \
+  bash "$HEALTH" > "$case_dir/output.txt" 2>&1
+invalid_rc=$?
+if [ "$invalid_rc" -ne 0 ]; then pass 'RH_SECURITY_ONLY=2 は停止する'; else fail 'RH_SECURITY_ONLY=2 は停止する'; fi
+assert_contains 'RH_SECURITY_ONLY=2 の fatal 理由を表示する' "$case_dir/output.txt" 'FATAL: RH_SECURITY_ONLY は 0 または 1 を指定してください'
+
+case_dir="$TEST_TMP/security-only-env-wins"
+mkdir -p "$case_dir/home" "$case_dir/empty"
+printf 'RH_SECURITY_ONLY=1\n' > "$case_dir/config.sh"
+HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/config.sh" RH_SECURITY_ONLY=0 RH_ROOTS="$case_dir/empty" \
+  RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+  RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
+  RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+  bash "$HEALTH" > "$case_dir/output.txt" 2>&1 || true
+assert_contains '環境変数 RH_SECURITY_ONLY=0 が config.sh の 1 より優先される' "$case_dir/output.txt" 'FAIL  対象リポが0件です'
+assert_contains '環境変数で通常点検に戻ると通常見出しを出す' "$case_dir/output.txt" '^# リポジトリ・ヘルスチェック$'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"
