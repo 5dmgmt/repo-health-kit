@@ -1,8 +1,18 @@
 # Changelog
 
-## 未リリース
+## 0.4.3 - 2026-10-23
 
-- 点検ルート直下の git 管理外のフォルダを WARN で知らせます（`RH_WARN_NONGIT`、初期値 1）。空のフォルダ・隠しフォルダ・`RH_NONGIT_IGNORE` に書いた名前は参考扱いです。これまでは黙って飛ばしていました。
+- 点検ルート直下の git 管理外のフォルダを WARN で知らせます（`RH_WARN_NONGIT`、初期値 1）。空のフォルダ・隠しフォルダ・`RH_NONGIT_IGNORE` に書いた名前は参考扱いです。これまでは黙って飛ばしていました。勝谷さん（@odk1972）からの PR #1 です。
+
+## 0.4.2 - 2026-10-23
+
+- `RH_SECURITY_ONLY=1` で、Mac のセキュリティ点検と、侵害パッケージ・侵害 GitHub Actions の照合だけを動かせるようにしました。fetch・同期・audit・CLI の更新確認はしません。リポが0件でも FAIL にしません。件名は `[mac-security]` です。
+
+## 0.4.1 - 2026-10-23
+
+- Python の pip 26.2.2・certifi 2026.10.19・uv 0.13.4 の最低版を点検します（eMudhra の件の Python 版）。site-packages のファイルを読むだけで、Python は動かしません。
+- 直し方として、sha256 付きの URL の表 `config/python-pins.tsv` を配ります。
+- Homebrew の bind（CVE-2026-94300）の最低版 9.20.30 / 9.21.27 を点検します。
 
 ## 0.4.0 - 2026-10-22
 
