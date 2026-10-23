@@ -139,11 +139,16 @@ Claude Code に相談するときは、値やシークレットを貼らず、�
 ```bash
 RH_ROOTS=("$HOME/Plugins" "$HOME/仕事のリポジトリ")
 RH_SCHEDULE="09:20 17:30"
+RH_WARN_NONGIT=1
+RH_NONGIT_IGNORE=("素材置き場")
 RH_AUTOFIX_PULL=1
 RH_AUTOFIX_CLI=0
 ```
 
 CLI の自動更新は初期状態で無効です。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
+
+点検ルート直下にある git 管理外のフォルダは、点検できないので WARN で知らせます（`RH_WARN_NONGIT=1`、初期値）。空のフォルダと `.` で始まるフォルダは参考扱いです。
+素材置き場など git 管理外でよいフォルダは `RH_NONGIT_IGNORE` に名前を書くと、WARN ではなく参考に出ます。
 
 Mac のセキュリティ点検の設定は次の7つです。値は初期値です。設定ファイルに書いていない項目は、この初期値で動きます。変えたい項目だけを書き足してください。
 

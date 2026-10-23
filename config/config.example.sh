@@ -39,6 +39,12 @@ RH_FETCH_FAIL_DAYS=2
 # dirty を WARN にする連続日数です。単発の dirty は作業中として扱います。
 RH_DIRTY_DAYS_WARN=3
 
+# 点検ルート直下の git 管理外のフォルダを WARN で知らせます。止める場合は 0 です。
+RH_WARN_NONGIT=1
+
+# git 管理外でもよいフォルダの名前です。ここに書いた名前は WARN ではなく参考に出ます。
+RH_NONGIT_IGNORE=()
+
 # .git の容量と、前回からの増加量の WARN 閾値（MB）です。
 RH_GIT_MB_WARN=1000
 RH_GIT_GROWTH_MB=100
