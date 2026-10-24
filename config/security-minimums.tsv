@@ -48,3 +48,6 @@ brew:openssl@3	3.4	3.4.8	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
 brew:openssl@4	4.0	4.0.3	CVE-2026-84782 ほか（OpenSSL・2026-09-29）
 brew:bind	9.20	9.20.30	CVE-2026-94300（BIND 9 の named・GSS-TSIG・ISC 2026-10-21）
 brew:bind	9.21	9.21.27	CVE-2026-94300（BIND 9 の named・GSS-TSIG・ISC 2026-10-21）
+brew:brotli	1.2	1.2.1	CVE-2026-111497（Brotli の展開の範囲外書き込み・Node2Shell／HTTP2Shell・2026-10-21）
+brew:brotli	1.1	1.1.1	CVE-2026-111497（Brotli の展開の範囲外書き込み・Node2Shell／HTTP2Shell・2026-10-21）
+brew:brotli	1.0	1.0.10	CVE-2026-111497（Brotli の展開の範囲外書き込み・Node2Shell／HTTP2Shell・2026-10-21）

@@ -1162,6 +1162,15 @@ run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BRE
 assert_contains 'Homebrew の curl 8.22.0 は修正版 8.23.0 より古い WARN' "$case_dir/output.txt" 'WARN  Homebrew の curl 8\.22\.0 は修正版 8\.23\.0 より古い版です（CVE-2026-92392.*）。brew upgrade curl'
 assert_not_contains '修正版の openssl@3 3.6.5 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
 
+case_dir="$TEST_TMP/brew-brotli"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='brotli 1.2.0\n'
+assert_contains 'Homebrew の brotli 1.2.0 は修正版 1.2.1 より古い WARN' "$case_dir/output.txt" 'WARN  Homebrew の brotli 1\.2\.0 は修正版 1\.2\.1 より古い版です（CVE-2026-111497.*）。brew upgrade brotli'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='brotli 1.2.1\n'
+assert_not_contains 'Homebrew の brotli 1.2.1 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Homebrew の brotli'
+
 case_dir="$TEST_TMP/brew-bind"
 fake_bin="$case_dir/fake-bin"
 make_fake_brew "$fake_bin"
@@ -1338,7 +1347,7 @@ assert_contains 'RH_ACTIONS_DENYLIST で表を差し替えられる' "$case_dir/
 RH_ACTIONS_DENYLIST="$case_dir/missing.tsv" run_health "$case_dir" "$case_dir/root with space"
 assert_contains '表が無いときは照合が動いていない FAIL' "$case_dir/output.txt" 'FAIL  customactions — GitHub Actions 照合が動いていません（同梱リスト不足）'
 
-# ---- 0.4.2: Mac のセキュリティ点検だけを動かす設定 ----
+# ---- 0.4.3: Mac のセキュリティ点検だけを動かす設定 ----
 
 case_dir="$TEST_TMP/security-only-state"
 mkdir -p "$case_dir"

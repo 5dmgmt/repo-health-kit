@@ -71,6 +71,8 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 - **Python の pip・certifi・uv**（eMudhra の件の続き。Python 公式の告知は 2026-10-20）。修正版は pip 26.2.2 / certifi 2026.10.19 / uv 0.13.4 です。pip は自分の中に証明書リストを持っていて、それを外す方法がありません。このため、macOS や certifi を更新しても、pip が古いままだと漏洩した証明書を信頼し続けます。Python ごと、作業用の環境（venv）ごとに更新が必要です。
 - **Homebrew の BIND**（CVE-2026-94300。DNS サーバーの `named` の穴。2026-10-21 公表）。修正版は 9.20.30 / 9.21.27 です。
 
+0.4.3 では、**Homebrew の brotli**（CVE-2026-111497。通信の圧縮形式 Brotli を展開する部品の穴で、Node.js・Python・curl などに広がりました。2026-10-21 公表）の最低版 1.2.1 / 1.1.1 / 1.0.10 を足しました。Python で `brotli`・`brotlicffi` を使っている場合は、1.2.1 以上へ上げてください。
+
 ### 何を見るか
 
 1. **Homebrew のセキュリティ部品の更新待ち** — 証明書リスト（ca-certificates）、openssl、curl、git、openssh、node、python、php など、セキュリティに関わる部品に更新が出ていないかを見ます。対象の一覧は同梱の `config/security-packages.txt` です。Homebrew を使っていない Mac では、この点検は行いません。
@@ -81,7 +83,7 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
    - **GitLab**: この Mac の Docker で `gitlab/gitlab-ce`・`gitlab/gitlab-ee` を動かしている場合に、イメージの版を見ます。修正版より古いものが動いていれば FAIL、止まっているだけなら WARN です。リポジトリの置き場が自社の GitLab らしいときは、サーバーの更新を確かめるよう「参考」に1回だけ出します。
    - **macOS**: 修正版より古い版、修正版が出ていない系列（Sonoma 14 以前）は WARN です。
    - **アプリ**: `/Applications` などにある Claude・Chrome・Firefox・Plex Media Server の版を、アプリの中の `Info.plist` から読みます。アプリは起動しません。修正版より古ければ WARN、Plex Media Server だけは動いていれば FAIL です。Firefox ESR は対象外です。
-   - **Claude Code と Homebrew の curl・OpenSSL・BIND**: 修正版より古ければ WARN です。Homebrew の「更新待ち」の WARN と同じものは、1件にまとめます。
+   - **Claude Code と Homebrew の curl・OpenSSL・BIND・brotli**: 修正版より古ければ WARN です。Homebrew の「更新待ち」の WARN と同じものは、1件にまとめます。
    - **Python の pip・certifi・uv**: Homebrew・python.org・pyenv・pipx・conda などで入れた Python と、リポジトリの中の作業用の環境（`.venv` など）を見ます。版は、それぞれの中のファイルから読みます。Python は動かしません。修正版より古ければ WARN です。直し方には、Python 公式の告知と同じ「ファイルの指紋（sha256）つき」の入れ方を添えます。古い pip で更新しても、途中ですり替えられないためです。指紋つきの URL は同梱の `config/python-pins.tsv` にあります。Python 3.9 以前では修正版の pip が入らないため、pip は「参考」に出します。そこにある certifi は WARN です。Mac に最初から入っている python3（Apple の管理物）は、「参考」だけに出します。uv の CLI（Homebrew・`~/.local/bin` など）も見ます。Docker のイメージの中は見ません。イメージを使っている場合は、キャッシュを使わずに作り直してください。
 3. **composer の依存** — `composer.lock` があるリポジトリで `composer audit` を実行し、本番依存の脆弱性を見ます。npm の依存と同じく、critical/high は FAIL です。
 4. **失効済みの証明書を信頼していないか** — Node、curl、python3 が、漏洩した証明書を使った確認用のテスト先へつながってしまうかを試します。つながった道具は、その証明書をまだ信頼しているということです。
