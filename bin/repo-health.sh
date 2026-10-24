@@ -927,6 +927,54 @@ check_claude_minimum() {
   done < "$ordered"
 }
 
+# Bun の CLI の版を、判定表（bun）の最低版と比べます。Bun は起動せず --version だけを呼びます。
+# 候補は type -aP bun と ~/.bun/bin/bun（RH_BUN_CANDIDATES があればそれだけ。テスト用）で、実体が同じものは 1 度だけ見ます。
+check_bun_minimum() {
+  local candidates ordered seen_real raw real version remedy
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="Bun の最低版は同梱リスト不足のため未検査"
+    return
+  fi
+  candidates="$TMP_DIR/bun-candidates.list"
+  ordered="$TMP_DIR/bun-ordered.list"
+  seen_real="$TMP_DIR/bun-seen.list"
+  : > "$candidates"; : > "$seen_real"
+  if [ -n "${RH_BUN_CANDIDATES+x}" ]; then
+    printf '%s\n' "$RH_BUN_CANDIDATES" >> "$candidates"
+  else
+    type -aP bun 2>/dev/null >> "$candidates" || true
+    [ -x "$HOME/.bun/bin/bun" ] && printf '%s\n' "$HOME/.bun/bin/bun" >> "$candidates"
+  fi
+  # 見つけた順を保ったまま、同じパスの重複を除く
+  awk 'NF && !seen[$0]++' "$candidates" > "$ordered"
+  while IFS= read -r raw; do
+    [ -f "$raw" ] && [ -x "$raw" ] || continue
+    real="$(real_path_of "$raw")"
+    if LC_ALL=C grep -Fqx "$real" "$seen_real" 2>/dev/null; then continue; fi
+    printf '%s\n' "$real" >> "$seen_real"
+    version="$(run_timeout 20 "$raw" --version 2>/dev/null | head -1 | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -z "$version" ]; then
+      NOTES[${#NOTES[@]}]="Bun（${raw}）— 版を判定できず未検査"
+      continue
+    fi
+    lookup_minimum_row bun "$version"
+    if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
+      security_detail "Bun ${version}（${raw}）— この系列は最低版リストに未掲載"
+      continue
+    fi
+    if ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
+      security_detail "Bun ${version}（${raw}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+      continue
+    fi
+    remedy="入れた方法で更新してください"
+    case "$raw:$real" in
+      "$HOME/.bun/bin/bun":*|*:"$HOME/.bun/bin/bun") remedy="bun upgrade で更新してください" ;;
+      *:*/Cellar/bun/*|*/Cellar/bun/*:*) remedy="brew upgrade bun で更新してください" ;;
+    esac
+    add_warning "Bun ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+  done < "$ordered"
+}
+
 # .app のフォルダを 1 行ずつ出します。/Applications は 1 段下（/Applications/*/*.app）まで、~/Applications は直下だけ。
 # RH_APP_DIRS（改行区切りのフォルダ一覧）があれば、それだけを 1 段下まで探します（テスト用）。
 list_app_bundles() {
@@ -1011,6 +1059,54 @@ check_app_minimums() {
     else
       add_warning "${label} ${version}（${app}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
     fi
+  done < "$apps"
+}
+
+# Electron 製のアプリ（Contents/Frameworks/Electron Framework.framework を持つ .app）の参考表示です。
+# Chromium と Node を抱えるため版では判断できません。Info.plist の更新日が、判定表（electron-after）の日付より前なら
+# 「その日より前の版のままかもしれない」と NOTES に 1 件ずつ出します。版は比べず、WARN にもしません。
+# アプリは起動せず、Info.plist の中身と更新日だけを見ます。
+check_electron_apps() {
+  local plutil_cmd apps app plist after name version raw_version plist_date
+  if [ ! -f "$SECURITY_MINIMUMS" ]; then
+    NOTES[${#NOTES[@]}]="Electron 製アプリの更新確認は同梱リスト不足のため未検査"
+    return
+  fi
+  lookup_minimum_row electron-after 0
+  after="$MIN_ROW_MINIMUM"
+  if ! printf '%s\n' "$after" | LC_ALL=C grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+    NOTES[${#NOTES[@]}]="Electron 製アプリの更新確認は判定表に基準日（electron-after）が無いため未検査"
+    return
+  fi
+  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
+  apps="$TMP_DIR/electron-app-bundles.list"
+  list_app_bundles | awk 'NF && !seen[$0]++' > "$apps"
+  while IFS= read -r app; do
+    [ -d "$app/Contents/Frameworks/Electron Framework.framework" ] || continue
+    plist="$app/Contents/Info.plist"
+    [ -f "$plist" ] || continue
+    plist_date="$(TZ=Asia/Tokyo /usr/bin/stat -f '%Sm' -t '%Y-%m-%d' "$plist" 2>/dev/null || true)"
+    if ! printf '%s\n' "$plist_date" | LC_ALL=C grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+      NOTES[${#NOTES[@]}]="${app} — Electron 製ですが更新日を取得できず未検査"
+      continue
+    fi
+    if [ "${plist_date//-/}" -ge "${after//-/}" ]; then
+      security_detail "Electron 製アプリ ${app}（${plist_date} 更新）— 基準日 ${after} 以降"
+      continue
+    fi
+    name="${app##*/}"
+    name="${name%.app}"
+    version=""
+    if [ -n "$plutil_cmd" ]; then
+      raw_version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+      version="$(leading_version "$raw_version")"
+      if [ -z "$version" ]; then
+        raw_version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+        version="$(leading_version "$raw_version")"
+      fi
+    fi
+    [ -z "$version" ] || name="${name} ${version}"
+    NOTES[${#NOTES[@]}]="${name}（${plist_date} 更新）は、Brotli の修正（${after}）より前の版のままかもしれません。アプリの「更新を確認」で最新にしてください"
   done < "$apps"
 }
 
@@ -1495,6 +1591,72 @@ python_pin_url() {
   done < "$PYTHON_PINS"
 }
 
+# site-packages の <名前>-*.dist-info/METADATA の Version: を読みます（同じ場所に複数あれば一番新しい版）。
+# 名前は大文字小文字違いを引数で並べて渡します（例: brotli Brotli）。取れなければ何も出しません。
+python_dist_info_version() {
+  local site="$1" stem metadata metadata_version found=""
+  shift
+  for stem in "$@"; do
+    for metadata in "$site/$stem"-*.dist-info/METADATA; do
+      [ -r "$metadata" ] || continue
+      metadata_version="$(sed -n 's/^Version:[[:space:]]*//p' "$metadata" 2>/dev/null | head -1)"
+      metadata_version="$(leading_version "$metadata_version")"
+      [ -n "$metadata_version" ] || continue
+      if [ -z "$found" ] || version_less_than "$found" "$metadata_version"; then
+        found="$metadata_version"
+      fi
+    done
+  done
+  [ -z "$found" ] || printf '%s\n' "$found"
+}
+
+# .../Cellar/<formula>/<版>/... のパスから formula 名を出します。
+brew_formula_from_site() {
+  printf '%s\n' "$1" | sed -n 's#.*/Cellar/\([^/][^/]*\)/[^/][^/]*/.*#\1#p' | head -1
+}
+
+# Cellar/<formula>/<版>/ の site-packages が、リンクされている版（<prefix>/opt/<formula> の実体）かを返します。
+# 古い版のフォルダが残っているだけの場合は 1 を返します。opt が無いときは判断できないので 0（見る側）に倒します。
+brew_formula_site_is_linked() {
+  local site="$1" keg prefix formula opt
+  keg="$(printf '%s\n' "$site" | sed -n 's#^\(.*/Cellar/[^/][^/]*/[^/][^/]*\)/.*#\1#p' | head -1)"
+  [ -n "$keg" ] || return 0
+  prefix="${keg%/Cellar/*}"
+  formula="$(brew_formula_from_site "$site")"
+  [ -n "$formula" ] || return 0
+  opt="$prefix/opt/$formula"
+  [ -e "$opt" ] || return 0
+  [ "$(real_path_of "$opt")" = "$(real_path_of "$keg")" ]
+}
+
+# Homebrew の formula が brew outdated に載っている（brew upgrade で直る）かを返します。載っていれば 0。
+# 一覧を取れなかったときは載っていない扱いにして、「Homebrew はまだ直していない」と案内する側に倒します。
+# 一覧は一時ファイルに書いてから読みます（パイプの右で配列を変えない）。
+brew_formula_is_outdated() {
+  local formula="$1" brew_cmd="$2" json names
+  json="$TMP_DIR/python-brew-outdated.json"
+  names="$TMP_DIR/python-brew-outdated.names"
+  if [ ! -f "$names" ]; then
+    : > "$names"
+    if [ -n "$brew_cmd" ] && [ -x "$brew_cmd" ] && run_timeout 120 "$brew_cmd" outdated --json=v2 > "$json" 2>/dev/null; then
+      if ! python3 - "$json" > "$names" 2>/dev/null <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+for formula in data.get("formulae", []):
+    if isinstance(formula, dict) and formula.get("name"):
+        print(formula["name"])
+PY
+      then
+        : > "$names"
+      fi
+    fi
+  fi
+  LC_ALL=C grep -Fqx "$formula" "$names" 2>/dev/null
+}
+
 add_python_site_candidate() {
   local candidates="$1" kind="$2" site="$3" python="$4" label="${5:-$3}"
   [ -d "$site" ] || return
@@ -1507,6 +1669,8 @@ check_python_packages() {
   local pip_version certifi_version uv_version metadata metadata_version pip_min pip_reason cert_min cert_reason
   local uv_min uv_reason pip_old cert_old uv_old pip_pin cert_pin python_name fallback user_flag
   local pip_remedy cert_remedy cert_real cert_keg uv_raw uv_real uv_output uv_root
+  local brotli_version brotlicffi_version brotli_min brotli_reason brotlicffi_min brotlicffi_reason
+  local brotli_old brotlicffi_old brotli_remedy brotlicffi_remedy uv_remedy formula_name site_tail
 
   if [ ! -f "$SECURITY_MINIMUMS" ]; then
     NOTES[${#NOTES[@]}]="Python の pip・certifi の最低版は同梱リスト不足のため未検査"
@@ -1520,10 +1684,10 @@ check_python_packages() {
   : > "$seen"
   : > "$formula_kegs"
 
+  if [ -n "${RH_BREW+x}" ]; then brew_cmd="$RH_BREW"; else brew_cmd="$(command -v brew 2>/dev/null || true)"; fi
   if [ -n "${RH_PYTHON_SITE_DIRS+x}" ]; then
     printf '%s\n' "$RH_PYTHON_SITE_DIRS" >> "$candidates"
   else
-    if [ -n "${RH_BREW+x}" ]; then brew_cmd="$RH_BREW"; else brew_cmd="$(command -v brew 2>/dev/null || true)"; fi
     if [ -n "$brew_cmd" ] && [ -x "$brew_cmd" ]; then
       brew_prefix="$("$brew_cmd" --prefix 2>/dev/null || true)"
       if [ -n "$brew_prefix" ]; then
@@ -1533,6 +1697,12 @@ check_python_packages() {
           python_name="${site%/site-packages}"
           python_name="${python_name##*/}"
           add_python_site_candidate "$candidates" brew "$site" "$brew_prefix/bin/${python_name}" "$site"
+        done
+        # formula 専用の環境（yt-dlp など、自分の Python と部品を抱える道具）。リンクされている版かどうかは読む側で見る
+        for site in "$brew_prefix"/Cellar/*/*/libexec/lib/python3.*/site-packages; do
+          [ -d "$site" ] || continue
+          version_root="${site%%/lib/python*}"
+          add_python_site_candidate "$candidates" brew-formula "$site" "$version_root/bin/python" "$site"
         done
       fi
     fi
@@ -1605,11 +1775,18 @@ check_python_packages() {
 
   while IFS=$'\t' read -r kind site python label; do
     [ -n "$kind" ] && [ -d "$site" ] || continue
-    case "$kind" in brew|python.org|user|pyenv|uv-python|pipx|conda|venv|apple) ;; *) continue;; esac
+    case "$kind" in brew|brew-formula|python.org|user|pyenv|uv-python|pipx|conda|venv|apple) ;; *) continue;; esac
+    # formula の古い版のフォルダが残っているだけのものは、動いていないので見ない
+    if [ "$kind" = "brew-formula" ] && ! brew_formula_site_is_linked "$site"; then continue; fi
     real="$(real_path_of "$site")"
     LC_ALL=C grep -Fqx "$real" "$seen" 2>/dev/null && continue
     printf '%s\n' "$real" >> "$seen"
     [ -n "$label" ] || label="$site"
+    formula_name=""
+    if [ "$kind" = "brew-formula" ]; then
+      formula_name="$(brew_formula_from_site "$site")"
+      [ -z "$formula_name" ] || label="Homebrew の ${formula_name}"
+    fi
     py_version="$(python_version_from_site "$site")"
     pip_version="$(python_package_version "$site/pip/__init__.py" || true)"
     certifi_version="$(python_package_version "$site/certifi/__init__.py" || true)"
@@ -1624,7 +1801,11 @@ check_python_packages() {
       fi
     done
 
+    brotli_version="$(python_dist_info_version "$site" brotli Brotli)"
+    brotlicffi_version="$(python_dist_info_version "$site" brotlicffi)"
+
     pip_min=""; pip_reason=""; cert_min=""; cert_reason=""; uv_min=""; uv_reason=""
+    brotli_min=""; brotli_reason=""; brotlicffi_min=""; brotlicffi_reason=""
     if [ -n "$pip_version" ]; then
       lookup_minimum_row pip "$pip_version"; pip_min="$MIN_ROW_MINIMUM"; pip_reason="$MIN_ROW_REASON"
     fi
@@ -1634,16 +1815,30 @@ check_python_packages() {
     if [ -n "$uv_version" ]; then
       lookup_minimum_row uv "$uv_version"; uv_min="$MIN_ROW_MINIMUM"; uv_reason="$MIN_ROW_REASON"
     fi
-    pip_old=0; cert_old=0; uv_old=0
+    if [ -n "$brotli_version" ]; then
+      lookup_minimum_row brotli-py "$brotli_version"; brotli_min="$MIN_ROW_MINIMUM"; brotli_reason="$MIN_ROW_REASON"
+    fi
+    if [ -n "$brotlicffi_version" ]; then
+      lookup_minimum_row brotlicffi "$brotlicffi_version"; brotlicffi_min="$MIN_ROW_MINIMUM"; brotlicffi_reason="$MIN_ROW_REASON"
+    fi
+    pip_old=0; cert_old=0; uv_old=0; brotli_old=0; brotlicffi_old=0
     [ -z "$pip_min" ] || ! version_less_than "$pip_version" "$pip_min" || pip_old=1
     [ -z "$cert_min" ] || ! version_less_than "$certifi_version" "$cert_min" || cert_old=1
     [ -z "$uv_min" ] || ! version_less_than "$uv_version" "$uv_min" || uv_old=1
+    [ -z "$brotli_min" ] || [ "$brotli_min" = "EOL" ] || ! version_less_than "$brotli_version" "$brotli_min" || brotli_old=1
+    [ -z "$brotlicffi_min" ] || [ "$brotlicffi_min" = "EOL" ] || ! version_less_than "$brotlicffi_version" "$brotlicffi_min" || brotlicffi_old=1
 
     if [ "$kind" = "apple" ]; then
       if [ "$pip_old" -eq 1 ]; then
         NOTES[${#NOTES[@]}]="Apple の python3（${label}）の pip ${pip_version} は古い版です（Apple の更新待ち）。/usr/bin/python3 -m pip でネットからパッケージを入れないでください"
       elif [ "$cert_old" -eq 1 ]; then
         NOTES[${#NOTES[@]}]="Apple の python3（${label}）の certifi ${certifi_version} は古い版です（Apple の更新待ち）。/usr/bin/python3 -m pip でネットからパッケージを入れないでください"
+      fi
+      if [ "$brotli_old" -eq 1 ]; then
+        NOTES[${#NOTES[@]}]="Apple の python3（${label}）の brotli ${brotli_version} は古い版です（Apple の更新待ち）。この python3 で知らないサイトを開かないでください"
+      fi
+      if [ "$brotlicffi_old" -eq 1 ]; then
+        NOTES[${#NOTES[@]}]="Apple の python3（${label}）の brotlicffi ${brotlicffi_version} は古い版です（Apple の更新待ち）。この python3 で知らないサイトを開かないでください"
       fi
       continue
     fi
@@ -1656,6 +1851,12 @@ check_python_packages() {
     fi
     if [ -n "$uv_version" ] && [ "$uv_old" -eq 0 ]; then
       security_detail "Python（${label}）の uv ${uv_version} — 最低版 ${uv_min} 以上"
+    fi
+    if [ -n "$brotli_version" ] && [ "$brotli_old" -eq 0 ]; then
+      security_detail "Python（${label}）の brotli ${brotli_version} — 最低版 ${brotli_min:-（未掲載）} 以上"
+    fi
+    if [ -n "$brotlicffi_version" ] && [ "$brotlicffi_old" -eq 0 ]; then
+      security_detail "Python（${label}）の brotlicffi ${brotlicffi_version} — 最低版 ${brotlicffi_min:-（未掲載）} 以上"
     fi
 
     if [ "$pip_old" -eq 1 ] && [ -n "$py_version" ] && version_less_than "$py_version" 3.10; then
@@ -1681,9 +1882,23 @@ check_python_packages() {
       fi
     fi
 
+    # formula 専用の環境は Homebrew の持ち物なので、直し方は brew upgrade <formula>。
+    # Homebrew がまだ直していない（brew outdated に載っていない）ときは、直るまでの注意を添える
+    uv_remedy="\"${python_name}\" -m pip install --upgrade uv"
+    site_tail=""
+    if [ -n "$formula_name" ]; then
+      uv_remedy="brew upgrade ${formula_name}"
+      if [ "$pip_old" -eq 1 ] || [ "$cert_old" -eq 1 ] || [ "$uv_old" -eq 1 ] || [ "$brotli_old" -eq 1 ] || [ "$brotlicffi_old" -eq 1 ]; then
+        brew_formula_is_outdated "$formula_name" "$brew_cmd" \
+          || site_tail="（Homebrew が直すまでは、その道具で知らないサイトを開かない）"
+      fi
+    fi
+
     pip_remedy=""
     if [ "$pip_old" -eq 1 ]; then
-      if [ -z "$pip_pin" ]; then
+      if [ -n "$formula_name" ]; then
+        pip_remedy="brew upgrade ${formula_name}"
+      elif [ -z "$pip_pin" ]; then
         pip_remedy="$fallback"
       else
         pip_remedy="\"${python_name}\" -m pip install \"pip @ ${pip_pin}\""
@@ -1696,6 +1911,8 @@ check_python_packages() {
     if [ "$cert_old" -eq 1 ]; then
       if [ -n "$cert_keg" ]; then
         cert_remedy="brew upgrade certifi"
+      elif [ -n "$formula_name" ]; then
+        cert_remedy="brew upgrade ${formula_name}"
       elif [ -z "$cert_pin" ]; then
         cert_remedy="$fallback"
       else
@@ -1706,19 +1923,41 @@ check_python_packages() {
     if [ "$pip_old" -eq 1 ] && [ "$cert_old" -eq 1 ]; then
       if [ "$pip_remedy" = "$fallback" ] || [ "$cert_remedy" = "$fallback" ]; then
         add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${fallback}"
+      elif [ "$pip_remedy" = "$cert_remedy" ]; then
+        add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${pip_remedy}${site_tail}"
       else
-        add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${pip_remedy} → ${cert_remedy}"
+        add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）、certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${pip_remedy} → ${cert_remedy}${site_tail}"
       fi
     elif [ "$pip_old" -eq 1 ]; then
-      add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）。直し方: ${pip_remedy}"
+      add_warning "Python（${label}）の pip ${pip_version} は修正版 ${pip_min} より古い版です（${pip_reason}）。直し方: ${pip_remedy}${site_tail}"
     elif [ "$cert_old" -eq 1 ]; then
-      add_warning "Python（${label}）の certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${cert_remedy}"
+      add_warning "Python（${label}）の certifi ${certifi_version} は修正版 ${cert_min} より古い版です（${cert_reason}）。直し方: ${cert_remedy}${site_tail}"
     fi
     if [ "$cert_old" -eq 1 ] && [ -n "$cert_keg" ]; then
       printf '%s\n' "$cert_keg" >> "$formula_kegs"
     fi
     if [ "$uv_old" -eq 1 ]; then
-      add_warning "Python（${label}）の uv ${uv_version} は修正版 ${uv_min} より古い版です（${uv_reason}）。pip を先に直してから、直し方: \"${python_name}\" -m pip install --upgrade uv"
+      if [ -n "$formula_name" ]; then
+        add_warning "Python（${label}）の uv ${uv_version} は修正版 ${uv_min} より古い版です（${uv_reason}）。直し方: ${uv_remedy}${site_tail}"
+      else
+        add_warning "Python（${label}）の uv ${uv_version} は修正版 ${uv_min} より古い版です（${uv_reason}）。pip を先に直してから、直し方: ${uv_remedy}"
+      fi
+    fi
+    if [ "$brotli_old" -eq 1 ]; then
+      if [ -n "$formula_name" ]; then
+        brotli_remedy="brew upgrade ${formula_name}"
+      else
+        brotli_remedy="\"${python_name}\" -m pip install ${user_flag}--upgrade brotli"
+      fi
+      add_warning "Python（${label}）の brotli ${brotli_version} は修正版 ${brotli_min} より古い版です（${brotli_reason}）。直し方: ${brotli_remedy}${site_tail}"
+    fi
+    if [ "$brotlicffi_old" -eq 1 ]; then
+      if [ -n "$formula_name" ]; then
+        brotlicffi_remedy="brew upgrade ${formula_name}"
+      else
+        brotlicffi_remedy="\"${python_name}\" -m pip install ${user_flag}--upgrade brotlicffi"
+      fi
+      add_warning "Python（${label}）の brotlicffi ${brotlicffi_version} は修正版 ${brotlicffi_min} より古い版です（${brotlicffi_reason}）。直し方: ${brotlicffi_remedy}${site_tail}"
     fi
   done < "$candidates"
 
@@ -2082,7 +2321,9 @@ check_mac_security() {
   check_gitlab_docker
   check_macos_minimum
   check_claude_minimum
+  check_bun_minimum
   check_app_minimums
+  check_electron_apps
   check_brew_formula_minimums
   check_tls_security
   check_software_updates

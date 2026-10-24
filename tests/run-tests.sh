@@ -76,7 +76,7 @@ run_security() {
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
     RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
-    RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= \
+    RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= RH_BUN_CANDIDATES= \
     "$@" bash "$HEALTH" > "$output" 2>&1 || true
 }
 
@@ -916,7 +916,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.3 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.4 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"
@@ -1426,6 +1426,379 @@ HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/config.sh" RH_SECURITY_ONLY=0 RH
   bash "$HEALTH" > "$case_dir/output.txt" 2>&1 || true
 assert_contains '環境変数 RH_SECURITY_ONLY=0 が config.sh の 1 より優先される' "$case_dir/output.txt" 'FAIL  対象リポが0件です'
 assert_contains '環境変数で通常点検に戻ると通常見出しを出す' "$case_dir/output.txt" '^# リポジトリ・ヘルスチェック$'
+
+# ---- 0.4.4: HTTP2Shell（Brotli）の残り — Python の brotli・formula 専用の環境・Bun・Electron のアプリ ----
+
+make_dist_info() {
+  local site="$1" name="$2" version="$3"
+  mkdir -p "$site/${name}-${version}.dist-info"
+  printf 'Metadata-Version: 2.4\nName: %s\nVersion: %s\n' "$name" "$version" > "$site/${name}-${version}.dist-info/METADATA"
+}
+
+make_fake_bun() {
+  local path="$1"
+  mkdir -p "${path%/*}"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'printf "%s\n" "${FAKE_BUN_OUTPUT-}"'
+  } > "$path"
+  chmod +x "$path"
+}
+
+# Electron 製のアプリを作る。引数: 置き場 名前 バンドルID 版 更新日(touch -t の形式) electron(1/0)
+make_fake_electron_app() {
+  local dir="$1" name="$2" bundle="$3" version="$4" stamp="$5" electron="$6"
+  make_fake_app "$dir" "$name" "$bundle" "$version"
+  if [ "$electron" = "1" ]; then
+    mkdir -p "$dir/$name.app/Contents/Frameworks/Electron Framework.framework"
+  fi
+  touch -t "$stamp" "$dir/$name.app/Contents/Info.plist"
+}
+
+# --- Python の brotli / brotlicffi ---
+
+case_dir="$TEST_TMP/brotli-old"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.0
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains '古い brotli 1.2.0 は 1.2.1 より古い WARN' "$case_dir/output.txt" 'WARN  Python（.*）の brotli 1\.2\.0 は修正版 1\.2\.1 より古い版です（CVE-2026-111497'
+assert_contains 'brotli の WARN に pip install --upgrade brotli を案内する' "$case_dir/output.txt" '直し方: ".*bin/python" -m pip install --upgrade brotli'
+
+case_dir="$TEST_TMP/brotli-fixed"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.1
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains '修正版の brotli 1.2.1 は WARN を出さない' "$case_dir/output.txt" 'WARN  Python（.*）の brotli '
+assert_contains '修正版の brotli は最低版以上の detail を出す' "$case_dir/output.txt" 'Python（.*）の brotli 1\.2\.1 — 最低版 1\.2\.1 以上'
+
+case_dir="$TEST_TMP/brotli-newest-wins"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.0
+make_dist_info "$site" brotli 1.2.1
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains '同じ場所に複数の brotli があれば一番新しい版で判定する' "$case_dir/output.txt" 'WARN  Python（.*）の brotli '
+
+case_dir="$TEST_TMP/brotlicffi-old"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotlicffi 1.2.0.0
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains '古い brotlicffi 1.2.0.0 は 1.2.1.0 より古い WARN' "$case_dir/output.txt" 'WARN  Python（.*）の brotlicffi 1\.2\.0\.0 は修正版 1\.2\.1\.0 より古い版です'
+assert_contains 'brotlicffi の WARN に pip install --upgrade brotlicffi を案内する' "$case_dir/output.txt" ' -m pip install --upgrade brotlicffi'
+assert_not_contains 'brotlicffi の dist-info を brotli と取り違えない' "$case_dir/output.txt" 'の brotli 1\.'
+
+case_dir="$TEST_TMP/brotlicffi-fixed"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/lib/python3.14/site-packages"
+python="$case_dir/bin/python"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotlicffi 1.2.1.0
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'venv\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains '修正版の brotlicffi 1.2.1.0 は WARN を出さない' "$case_dir/output.txt" 'WARN  Python（.*）の brotlicffi '
+
+case_dir="$TEST_TMP/brotli-user-flag"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/home/Library/Python/3.14/lib/python/site-packages"
+python="$case_dir/python3.14"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.0
+make_exit_command "$python" 0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'user\t%s\t%s' "$site" "$python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains 'user site の古い brotli は --user 付きの直し方を案内する' "$case_dir/output.txt" ' -m pip install --user --upgrade brotli'
+
+case_dir="$TEST_TMP/brotli-apple"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/site-packages"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 26.2.2 2026.10.19
+make_dist_info "$site" brotli 1.0.9
+: > "$case_dir/brew.log"
+python_sites="$(printf 'apple\t%s\t/usr/bin/python3' "$site")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains 'Apple 管理の Python の brotli は WARN にしない' "$case_dir/output.txt" '^WARN  (Python|Apple)'
+assert_count 'Apple 管理の Python の brotli は NOTES 1件' "$case_dir/output.txt" 'Apple の python3（.*）の brotli 1\.0\.9 は古い版です（Apple の更新待ち）' 1
+
+# --- Homebrew の formula 専用の環境（brew-formula） ---
+
+case_dir="$TEST_TMP/brew-formula-brotli-old"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t%s' "$site" "$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/bin/python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains 'formula 専用の環境の古い brotli は WARN（場所の名前は Homebrew の formula）' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）の brotli 1\.2\.0 は修正版 1\.2\.1 より古い版です'
+assert_contains 'formula 専用の環境の直し方は brew upgrade <formula>' "$case_dir/output.txt" '直し方: brew upgrade yt-dlp'
+assert_contains 'Homebrew がまだ直していないときは、直るまでの注意を添える' "$case_dir/output.txt" 'brew upgrade yt-dlp（Homebrew が直すまでは、その道具で知らないサイトを開かない）'
+
+case_dir="$TEST_TMP/brew-formula-brotli-outdated"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.0
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t%s' "$site" "$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/bin/python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites" \
+  FAKE_BREW_JSON='{"formulae":[{"name":"yt-dlp","installed_versions":["2026.10.21"],"current_version":"2026.10.25"}],"casks":[]}'
+assert_contains 'Homebrew が直した（brew outdated にある）formula は brew upgrade を案内する' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）の brotli 1\.2\.0.*直し方: brew upgrade yt-dlp$'
+assert_not_contains 'brew outdated にある formula には直るまでの注意を添えない' "$case_dir/output.txt" 'Homebrew が直すまでは'
+
+case_dir="$TEST_TMP/brew-formula-brotli-fixed"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_dist_info "$site" brotli 1.2.1
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t%s' "$site" "$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/bin/python")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains '修正版の brotli を抱える formula は WARN を出さない' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）'
+assert_contains '修正版の formula 専用の環境は detail に残す' "$case_dir/output.txt" 'Python（Homebrew の yt-dlp）の brotli 1\.2\.1 — 最低版 1\.2\.1 以上'
+
+case_dir="$TEST_TMP/brew-formula-linked-only"
+fake_bin="$case_dir/fake-bin"
+old_site="$case_dir/homebrew/Cellar/yt-dlp/2026.9.1/libexec/lib/python3.15/site-packages"
+new_site="$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_dist_info "$old_site" brotli 1.2.0
+make_dist_info "$new_site" brotli 1.2.1
+mkdir -p "$case_dir/homebrew/opt"
+ln -s "$case_dir/homebrew/Cellar/yt-dlp/2026.10.21" "$case_dir/homebrew/opt/yt-dlp"
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t/x/python\nbrew-formula\t%s\t/x/python' "$old_site" "$new_site")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_not_contains 'リンクされていない古い版の formula は見ない' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）'
+assert_contains 'リンクされている版の formula は見る' "$case_dir/output.txt" 'Python（Homebrew の yt-dlp）の brotli 1\.2\.1 — 最低版 1\.2\.1 以上'
+
+case_dir="$TEST_TMP/brew-formula-linked-old"
+fake_bin="$case_dir/fake-bin"
+old_site="$case_dir/homebrew/Cellar/yt-dlp/2026.9.1/libexec/lib/python3.15/site-packages"
+new_site="$case_dir/homebrew/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_dist_info "$old_site" brotli 1.2.1
+make_dist_info "$new_site" brotli 1.2.0
+mkdir -p "$case_dir/homebrew/opt"
+ln -s "$case_dir/homebrew/Cellar/yt-dlp/2026.10.21" "$case_dir/homebrew/opt/yt-dlp"
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t/x/python\nbrew-formula\t%s\t/x/python' "$old_site" "$new_site")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_count 'リンクされている版だけが古いときは WARN 1件' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）の brotli 1\.2\.0' 1
+
+case_dir="$TEST_TMP/brew-formula-pip-old"
+fake_bin="$case_dir/fake-bin"
+site="$case_dir/homebrew/Cellar/sample-tool/1.0.0/libexec/lib/python3.15/site-packages"
+make_fake_brew "$fake_bin"
+make_python_site "$site" 26.2.1 2026.10.19
+: > "$case_dir/brew.log"
+python_sites="$(printf 'brew-formula\t%s\t/x/python' "$site")"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_PYTHON_SITE_DIRS="$python_sites"
+assert_contains 'formula 専用の環境の古い pip も今の決まりで見る（直し方は brew upgrade <formula>）' "$case_dir/output.txt" 'WARN  Python（Homebrew の sample-tool）の pip 26\.2\.1 は修正版 26\.2\.2 より古い版です.*直し方: brew upgrade sample-tool'
+
+# RH_PYTHON_SITE_DIRS を unset にして、候補の場所を実際に探させる（Homebrew の prefix は偽の brew が返す）
+run_security_discover() {
+  local case_dir="$1" fake_bin="$2" output
+  shift 2
+  output="$case_dir/output.txt"
+  mkdir -p "$case_dir/home" "$case_dir/root"
+  env -u RH_PYTHON_SITE_DIRS PATH="$fake_bin:$PATH" HOME="$case_dir/home" \
+    RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$case_dir/root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=0 \
+    RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
+    RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
+    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
+    RH_UV_CANDIDATES= RH_BUN_CANDIDATES= \
+    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+}
+
+case_dir="$TEST_TMP/brew-formula-discover-old"
+fake_bin="$case_dir/fake-bin"
+prefix="$case_dir/homebrew"
+make_fake_brew "$fake_bin"
+make_dist_info "$prefix/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages" brotli 1.2.0
+mkdir -p "$prefix/opt"
+ln -s "$prefix/Cellar/yt-dlp/2026.10.21" "$prefix/opt/yt-dlp"
+: > "$case_dir/brew.log"
+run_security_discover "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_PREFIX="$prefix"
+assert_contains 'Cellar の formula 専用の環境を実際に探して古い brotli を WARN にする' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）の brotli 1\.2\.0 は修正版 1\.2\.1 より古い版です.*brew upgrade yt-dlp'
+
+case_dir="$TEST_TMP/brew-formula-discover-unlinked"
+fake_bin="$case_dir/fake-bin"
+prefix="$case_dir/homebrew"
+make_fake_brew "$fake_bin"
+make_dist_info "$prefix/Cellar/yt-dlp/2026.9.1/libexec/lib/python3.15/site-packages" brotli 1.2.0
+make_dist_info "$prefix/Cellar/yt-dlp/2026.10.21/libexec/lib/python3.15/site-packages" brotli 1.2.1
+mkdir -p "$prefix/opt"
+ln -s "$prefix/Cellar/yt-dlp/2026.10.21" "$prefix/opt/yt-dlp"
+: > "$case_dir/brew.log"
+run_security_discover "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_PREFIX="$prefix"
+assert_not_contains 'Cellar を探すときもリンクされていない古い版は見ない' "$case_dir/output.txt" 'WARN  Python（Homebrew の yt-dlp）'
+assert_contains 'Cellar を探すときリンクされている版は見る' "$case_dir/output.txt" 'Python（Homebrew の yt-dlp）の brotli 1\.2\.1 — 最低版 1\.2\.1 以上'
+
+# --- Bun ---
+
+case_dir="$TEST_TMP/bun-old"
+fake_bin="$case_dir/fake-bin"
+bun_path="$case_dir/home/.bun/bin/bun"
+make_fake_brew "$fake_bin"
+make_fake_bun "$bun_path"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT='1.3.11'
+assert_contains 'Bun 1.3.11 は修正版 1.4.4 より古い WARN' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11（.*\.bun/bin/bun）は修正版 1\.4\.4 より古い版です（CVE-2026-111497'
+assert_contains '.bun/bin/bun の WARN は bun upgrade を案内する' "$case_dir/output.txt" 'bun upgrade で更新してください'
+
+case_dir="$TEST_TMP/bun-fixed"
+fake_bin="$case_dir/fake-bin"
+bun_path="$case_dir/home/.bun/bin/bun"
+make_fake_brew "$fake_bin"
+make_fake_bun "$bun_path"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT='1.4.4'
+assert_not_contains 'Bun 1.4.4 は要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  Bun '
+assert_contains '修正版の Bun は最低版以上の detail を出す' "$case_dir/output.txt" 'Bun 1\.4\.4（.*）— 最低版 1\.4\.4 以上'
+
+case_dir="$TEST_TMP/bun-unknown"
+fake_bin="$case_dir/fake-bin"
+bun_path="$case_dir/bin/bun"
+make_fake_brew "$fake_bin"
+make_fake_bun "$bun_path"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT=''
+assert_contains '版を返さない Bun は未検査の NOTES' "$case_dir/output.txt" 'Bun（.*bin/bun）— 版を判定できず未検査'
+assert_not_contains '版を返さない Bun は WARN にしない' "$case_dir/output.txt" '(WARN|FAIL)  Bun '
+
+case_dir="$TEST_TMP/bun-cellar"
+fake_bin="$case_dir/fake-bin"
+bun_path="$case_dir/Cellar/bun/1.3.11/bin/bun"
+make_fake_brew "$fake_bin"
+make_fake_bun "$bun_path"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT='1.3.11'
+assert_contains 'Homebrew の古い Bun は brew upgrade bun を案内する' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11（.*）は修正版 1\.4\.4 より古い版です.*brew upgrade bun'
+
+case_dir="$TEST_TMP/bun-other"
+fake_bin="$case_dir/fake-bin"
+bun_path="$case_dir/tools/bun"
+make_fake_brew "$fake_bin"
+make_fake_bun "$bun_path"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT='1.3.11'
+assert_contains '入れた方法が分からない Bun は入れた方法での更新を案内する' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11（.*）は修正版 1\.4\.4 より古い版です.*入れた方法で更新してください'
+
+case_dir="$TEST_TMP/bun-symlink"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_bun "$case_dir/real/bun"
+mkdir -p "$fake_bin"
+ln -s "$case_dir/real/bun" "$fake_bin/bun"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BUN_OUTPUT='1.3.11' \
+  RH_BUN_CANDIDATES="$fake_bin/bun
+$case_dir/real/bun"
+assert_count '同じ実体の Bun は 1 度だけ見る' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11' 1
+
+case_dir="$TEST_TMP/bun-minimums-missing"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_MINIMUMS="$case_dir/missing-minimums.tsv"
+assert_contains '最低版表が無いときは Bun 点検不足の NOTES' "$case_dir/output.txt" 'Bun の最低版は同梱リスト不足のため未検査'
+assert_contains '最低版表が無いときは Electron 点検不足の NOTES' "$case_dir/output.txt" 'Electron 製アプリの更新確認は同梱リスト不足のため未検査'
+
+# --- Electron 製のアプリ（参考だけ） ---
+
+case_dir="$TEST_TMP/electron-old"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Slack' com.tinyspeck.slackmacgap 4.50.0 202610011200 1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_count '基準日より前の Electron 製アプリは NOTES 1件' "$case_dir/output.txt" 'Slack 4\.50\.0（2026-10-01 更新）は、Brotli の修正（2026-10-21）より前の版のままかもしれません' 1
+assert_contains 'Electron の NOTES に更新の案内を含める' "$case_dir/output.txt" 'アプリの「更新を確認」で最新にしてください'
+assert_not_contains 'Electron 製アプリは WARN にしない' "$case_dir/output.txt" '(WARN|FAIL)  .*Slack'
+
+case_dir="$TEST_TMP/electron-new"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Slack' com.tinyspeck.slackmacgap 4.51.0 202610231200 1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_not_contains '基準日より後に更新された Electron 製アプリは NOTES に出さない' "$case_dir/output.txt" 'Slack .*より前の版のままかもしれません'
+
+case_dir="$TEST_TMP/electron-not-electron"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Plain' com.example.plain 1.0.0 202610011200 0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_not_contains 'Electron でないアプリは NOTES に出さない' "$case_dir/output.txt" 'Plain .*より前の版のままかもしれません'
+
+case_dir="$TEST_TMP/electron-several"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Discord' com.hnc.Discord 0.0.350 202610051200 1
+make_fake_electron_app "$apps" 'Obsidian' md.obsidian 1.9.0 202610301200 1
+make_fake_electron_app "$apps/入れ子" '1Password' com.1password.1password 8.11.0 202609151200 1
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
+assert_count '古い Electron 製アプリだけを 1 件ずつ NOTES に出す' "$case_dir/output.txt" 'より前の版のままかもしれません' 2
+assert_contains '入れ子のフォルダの Electron 製アプリも見る' "$case_dir/output.txt" '1Password 8\.11\.0（2026-09-15 更新）は、Brotli の修正'
+
+case_dir="$TEST_TMP/electron-table-date"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Slack' com.tinyspeck.slackmacgap 4.51.0 202610231200 1
+printf 'electron-after\t*\t2026-10-30\tテスト用\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" RH_SECURITY_MINIMUMS="$minimums"
+assert_contains '基準日は判定表の electron-after から読む' "$case_dir/output.txt" 'Slack 4\.51\.0（2026-10-23 更新）は、Brotli の修正（2026-10-30）より前の版のままかもしれません'
+
+case_dir="$TEST_TMP/electron-no-date-row"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+minimums="$case_dir/minimums.tsv"
+make_fake_brew "$fake_bin"
+make_fake_electron_app "$apps" 'Slack' com.tinyspeck.slackmacgap 4.50.0 202610011200 1
+printf 'app:com.example.sample\t*\t2.0.0\tテスト用\n' > "$minimums"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" RH_SECURITY_MINIMUMS="$minimums"
+assert_contains '判定表に基準日が無いときは未検査の NOTES' "$case_dir/output.txt" 'Electron 製アプリの更新確認は判定表に基準日（electron-after）が無いため未検査'
+assert_not_contains '基準日が無いときは Slack の NOTES を出さない' "$case_dir/output.txt" 'Slack .*より前の版のままかもしれません'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

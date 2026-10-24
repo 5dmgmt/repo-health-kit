@@ -73,6 +73,12 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 
 0.4.3 では、**Homebrew の brotli**（CVE-2026-111497。通信の圧縮形式 Brotli を展開する部品の穴で、Node.js・Python・curl などに広がりました。2026-10-21 公表）の最低版 1.2.1 / 1.1.1 / 1.0.10 を足しました。Python で `brotli`・`brotlicffi` を使っている場合は、1.2.1 以上へ上げてください。
 
+0.4.4 では、同じ Brotli の穴（通称 HTTP2Shell）の残りを足しました。
+
+- **Python の `brotli`・`brotlicffi`**（1.2.1 / 1.2.1.0 より古いもの）。Homebrew が道具ごとに持っている専用の Python 環境（たとえば `yt-dlp` の中）も見ます。Homebrew がまだ直していないときは、その旨を添えて知らせます。
+- **Bun**（1.4.4 より古いもの）。同梱の Brotli と、証明書リスト（eMudhra）の両方が直った版です。
+- **Electron 製のアプリ**（Slack・Discord・1Password・ChatGPT・Obsidian など）。アプリごとの修正版は公表されていないため、Brotli の修正（2026-10-21）より前に更新されたままのアプリを「参考」に並べます。アプリの「更新を確認」で最新にしてください。
+
 ### 何を見るか
 
 1. **Homebrew のセキュリティ部品の更新待ち** — 証明書リスト（ca-certificates）、openssl、curl、git、openssh、node、python、php など、セキュリティに関わる部品に更新が出ていないかを見ます。対象の一覧は同梱の `config/security-packages.txt` です。Homebrew を使っていない Mac では、この点検は行いません。
