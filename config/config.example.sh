@@ -64,6 +64,20 @@ RH_SKIP_FETCH=0
 # Mac のセキュリティ点検をすべて止める場合だけ 1 にします。
 RH_SKIP_SECURITY=0
 
+# 入っているソフト（Homebrew・アプリ・App Store・npm -g）の更新確認です。
+# 止める場合だけ 1 にします。
+RH_SKIP_SOFTWARE=0
+
+# formula と、GUI アプリを持たない cask を自動更新する場合は 1 にします。
+# GUI アプリと npm は自動更新しません。
+RH_AUTOFIX_SOFTWARE=0
+
+# 同じ更新がこの日数以上残ったら WARN にします。
+RH_SOFTWARE_STALE_DAYS=14
+
+# 更新確認から外す formula／cask token／npm package／アプリ名です。
+RH_SOFTWARE_IGNORE=()
+
 # 失効済み証明書への接続点検を止める場合だけ 0 にします。
 RH_TLS_PROBE=1
 

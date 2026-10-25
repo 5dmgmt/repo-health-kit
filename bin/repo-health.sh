@@ -56,6 +56,11 @@ RH_ENV_SKIP_SECURITY_SET="${RH_SKIP_SECURITY+x}"; RH_ENV_SKIP_SECURITY_VALUE="${
 RH_ENV_SKIP_FETCH_SET="${RH_SKIP_FETCH+x}"; RH_ENV_SKIP_FETCH_VALUE="${RH_SKIP_FETCH-}"
 RH_ENV_NO_DESKTOP_SET="${RH_NO_DESKTOP+x}"; RH_ENV_NO_DESKTOP_VALUE="${RH_NO_DESKTOP-}"
 RH_ENV_SECURITY_ONLY_SET="${RH_SECURITY_ONLY+x}"; RH_ENV_SECURITY_ONLY_VALUE="${RH_SECURITY_ONLY-}"
+RH_ENV_SKIP_SOFTWARE_SET="${RH_SKIP_SOFTWARE+x}"; RH_ENV_SKIP_SOFTWARE_VALUE="${RH_SKIP_SOFTWARE-}"
+RH_ENV_AUTOFIX_SOFTWARE_SET="${RH_AUTOFIX_SOFTWARE+x}"; RH_ENV_AUTOFIX_SOFTWARE_VALUE="${RH_AUTOFIX_SOFTWARE-}"
+RH_ENV_SOFTWARE_STALE_DAYS_SET="${RH_SOFTWARE_STALE_DAYS+x}"; RH_ENV_SOFTWARE_STALE_DAYS_VALUE="${RH_SOFTWARE_STALE_DAYS-}"
+RH_ENV_SOFTWARE_IGNORE_SET="${RH_SOFTWARE_IGNORE+x}"; RH_ENV_SOFTWARE_IGNORE_VALUE="${RH_SOFTWARE_IGNORE-}"
+RH_ENV_SOFTWARE_SKIP_TOOLS_SET="${RH_SOFTWARE_SKIP_TOOLS+x}"; RH_ENV_SOFTWARE_SKIP_TOOLS_VALUE="${RH_SOFTWARE_SKIP_TOOLS-}"
 if [ -z "$RH_ENV_ROOTS_SET" ]; then
   RH_ROOTS=("$HOME/Plugins")
 fi
@@ -84,6 +89,10 @@ fi
 : "${RH_NOMAIL:=0}"
 : "${RH_NO_DESKTOP:=0}"
 : "${RH_SECURITY_ONLY:=0}"
+: "${RH_SKIP_SOFTWARE:=0}"
+: "${RH_AUTOFIX_SOFTWARE:=0}"
+: "${RH_SOFTWARE_STALE_DAYS:=14}"
+: "${RH_SOFTWARE_SKIP_TOOLS:=}"
 
 RH_CONFIG_FILE="${RH_CONFIG_FILE:-$HOME/.config/repo-health-kit/config.sh}"
 if [ -f "$RH_CONFIG_FILE" ]; then
@@ -98,6 +107,18 @@ fi
 [ -z "$RH_ENV_SKIP_FETCH_SET" ] || RH_SKIP_FETCH="$RH_ENV_SKIP_FETCH_VALUE"
 [ -z "$RH_ENV_NO_DESKTOP_SET" ] || RH_NO_DESKTOP="$RH_ENV_NO_DESKTOP_VALUE"
 [ -z "$RH_ENV_SECURITY_ONLY_SET" ] || RH_SECURITY_ONLY="$RH_ENV_SECURITY_ONLY_VALUE"
+[ -z "$RH_ENV_SKIP_SOFTWARE_SET" ] || RH_SKIP_SOFTWARE="$RH_ENV_SKIP_SOFTWARE_VALUE"
+[ -z "$RH_ENV_AUTOFIX_SOFTWARE_SET" ] || RH_AUTOFIX_SOFTWARE="$RH_ENV_AUTOFIX_SOFTWARE_VALUE"
+[ -z "$RH_ENV_SOFTWARE_STALE_DAYS_SET" ] || RH_SOFTWARE_STALE_DAYS="$RH_ENV_SOFTWARE_STALE_DAYS_VALUE"
+if [ -n "$RH_ENV_SOFTWARE_IGNORE_SET" ]; then
+  RH_SOFTWARE_IGNORE=()
+  while IFS= read -r software_ignore_item; do
+    [ -n "$software_ignore_item" ] && RH_SOFTWARE_IGNORE[${#RH_SOFTWARE_IGNORE[@]}]="$software_ignore_item"
+  done < <(printf '%s\n' "$RH_ENV_SOFTWARE_IGNORE_VALUE" | tr ' ' '\n')
+elif [ -z "${RH_SOFTWARE_IGNORE+x}" ]; then
+  RH_SOFTWARE_IGNORE=()
+fi
+[ -z "$RH_ENV_SOFTWARE_SKIP_TOOLS_SET" ] || RH_SOFTWARE_SKIP_TOOLS="$RH_ENV_SOFTWARE_SKIP_TOOLS_VALUE"
 
 case "$RH_MAIL_METHOD" in resend|none) ;; *) fatal "RH_MAIL_METHOD は resend または none を指定してください";; esac
 case "$RH_SECURITY_ONLY" in 0|1) ;; *) fatal "RH_SECURITY_ONLY は 0 または 1 を指定してください";; esac
@@ -120,6 +141,9 @@ is_uint "$RH_SKIP_SOFTWAREUPDATE" || fatal "RH_SKIP_SOFTWAREUPDATE は0以上の
 is_uint "$RH_KIT_UPDATE_CHECK" || fatal "RH_KIT_UPDATE_CHECK は0以上の整数で指定してください"
 is_uint "$RH_NOMAIL" || fatal "RH_NOMAIL は0以上の整数で指定してください"
 is_uint "$RH_NO_DESKTOP" || fatal "RH_NO_DESKTOP は0以上の整数で指定してください"
+is_uint "$RH_SKIP_SOFTWARE" || fatal "RH_SKIP_SOFTWARE は0以上の整数で指定してください"
+is_uint "$RH_AUTOFIX_SOFTWARE" || fatal "RH_AUTOFIX_SOFTWARE は0以上の整数で指定してください"
+is_uint "$RH_SOFTWARE_STALE_DAYS" || fatal "RH_SOFTWARE_STALE_DAYS は0以上の整数で指定してください"
 
 APP_DIR="${RH_APP_DIR:-$HOME/Library/Application Support/repo-health-kit}"
 LOG_DIR="${RH_LOG_DIR:-$HOME/Library/Logs/repo-health-kit}"
@@ -145,8 +169,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-declare -a FAILURES WARNINGS AUTOFIXED WORKING SYNC_WAIT CLI_UPDATES NOTES DETAILS
-FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); NOTES=(); DETAILS=()
+declare -a FAILURES WARNINGS AUTOFIXED WORKING SYNC_WAIT CLI_UPDATES SOFTWARE_UPDATES NOTES DETAILS
+FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); SOFTWARE_UPDATES=(); NOTES=(); DETAILS=()
 
 add_failure() { FAILURES[${#FAILURES[@]}]="$(clean_text "$*")"; }
 add_warning() { WARNINGS[${#WARNINGS[@]}]="$(clean_text "$*")"; }
@@ -738,8 +762,89 @@ EOF
   [ "$l4" -lt "$r4" ]
 }
 
+npm_release_info() {
+  local package="$1" current="$2" time_json key latest_tag
+  NPM_LATEST=""; NPM_TARGET=""; NPM_LATEST_DATE=""; NPM_LATEST_WAIT=0
+  key="$(streak_key "npm-time-$package")"
+  time_json="$TMP_DIR/${key}.json"
+  if ! run_timeout 40 npm view "$package" time --json > "$time_json" 2>/dev/null; then
+    return 1
+  fi
+  # latest タグより上の版（next 止まりで見送られた版など）は上げ先にしない
+  latest_tag="$(run_timeout 40 npm view "$package" dist-tags.latest 2>/dev/null || true)"
+  IFS=$'\t' read -r NPM_LATEST NPM_TARGET NPM_LATEST_DATE NPM_LATEST_WAIT < <(
+    python3 -I - "$time_json" "$current" "$latest_tag" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+
+def version_key(value):
+    if not isinstance(value, str) or "-" in value:
+        return None
+    match = re.fullmatch(r"v?(\d+(?:\.\d+)*)", value)
+    if not match:
+        return None
+    parts = tuple(int(part) for part in match.group(1).split("."))
+    return parts + (0,) * (8 - len(parts))
+
+
+def published_at(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+current_key = version_key(sys.argv[2])
+if current_key is None:
+    raise SystemExit(1)
+releases = []
+for version, raw_time in data.items():
+    key = version_key(version)
+    moment = published_at(raw_time)
+    if key is not None and moment is not None:
+        releases.append((key, version.lstrip("v"), moment))
+cap_key = version_key(sys.argv[3].strip()) if len(sys.argv) > 3 else None
+if cap_key is not None and any(item[0] == cap_key for item in releases):
+    releases = [item for item in releases if item[0] <= cap_key]
+if not releases:
+    raise SystemExit(1)
+latest_key, latest, latest_time = max(releases, key=lambda item: item[0])
+cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+eligible = [item for item in releases if current_key < item[0] and item[2] <= cutoff]
+target = max(eligible, key=lambda item: item[0])[1] if eligible else "-"
+jst = timezone(timedelta(hours=9))
+latest_date = latest_time.astimezone(jst).strftime("%Y-%m-%d %H:%M JST")
+waiting = "1" if current_key < latest_key and latest_time > cutoff else "0"
+print(f"{latest}\t{target}\t{latest_date}\t{waiting}")
+PY
+  ) || return 1
+  [ "$NPM_TARGET" != "-" ] || NPM_TARGET=""
+  [ -n "$NPM_LATEST" ]
+}
+
+npm_package_for_cli() {
+  case "$1" in
+    claude) printf '%s' '@anthropic-ai/claude-code' ;;
+    codex) printf '%s' '@openai/codex' ;;
+    npm|vercel|supabase) printf '%s' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
 update_cli() {
-  local tool="$1" path="$2" real package formula
+  local tool="$1" path="$2" target="$3" real package formula
   real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null || printf '%s' "$path")"
   case "$tool" in
     claude) package='@anthropic-ai/claude-code'; formula='claude-code' ;;
@@ -754,7 +859,8 @@ update_cli() {
   case "$real$path" in
     */node_modules/*)
       [ -n "$package" ] || return 1
-      run_timeout 600 npm install -g "${package}@latest" >/dev/null 2>&1
+      [ -n "$target" ] || return 1
+      run_timeout 600 npm install -g "${package}@${target}" >/dev/null 2>&1
       ;;
     */.local/bin/claude)
       run_timeout 600 "$path" update >/dev/null 2>&1
@@ -768,7 +874,8 @@ update_cli() {
 }
 
 check_cli_tools() {
-  local tool path current latest duplicate duplicate_version current_major latest_major
+  local tool path current latest target duplicate duplicate_version current_major latest_major
+  local package wait_note
   if [ "$RH_SKIP_CLI" = "1" ]; then
     NOTES[${#NOTES[@]}]="CLI 更新確認は RH_SKIP_CLI=1 のため未検査"
     return
@@ -786,22 +893,44 @@ check_cli_tools() {
         add_warning "$tool — 重複インストール（採用=$path:$current / 他=$duplicate:${duplicate_version}）"
       fi
     done < <(type -aP "$tool" 2>/dev/null | LC_ALL=C sort -u)
-    latest="$(latest_version "$tool" || true)"
+    target=""; wait_note=""
+    if package="$(npm_package_for_cli "$tool" 2>/dev/null)"; then
+      if npm_release_info "$package" "$current"; then
+        latest="$NPM_LATEST"
+        target="$NPM_TARGET"
+        if [ "$NPM_LATEST_WAIT" = "1" ]; then
+          wait_note="（最新 ${latest} は ${NPM_LATEST_DATE} 公開・3 日待ち）"
+        fi
+      else
+        latest=""
+      fi
+    else
+      latest="$(latest_version "$tool" || true)"
+      target="$latest"
+    fi
     if [ -z "$latest" ]; then
       NOTES[${#NOTES[@]}]="$tool — 最新版を取得できず未検査"
       continue
     fi
     if version_less_than "$current" "$latest"; then
-      current_major="${current%%.*}"; latest_major="${latest%%.*}"
-      if [ "$latest_major" -gt "$current_major" ]; then
-        if [ "$RH_AUTOFIX_CLI" = "1" ] && update_cli "$tool" "$path"; then
-          AUTOFIXED[${#AUTOFIXED[@]}]="$tool — メジャー版遅れ $current → $latest を自動更新"
+      if [ -z "$target" ] || ! version_less_than "$current" "$target"; then
+        if [ -n "$wait_note" ]; then
+          CLI_UPDATES[${#CLI_UPDATES[@]}]="$tool — 現在 $current ${wait_note}"
         else
-          add_warning "$tool — メジャー版が遅れています $current → $latest"
+          NOTES[${#NOTES[@]}]="$tool — 3 日以上前に公開された上げ先を取得できず未検査"
+        fi
+        continue
+      fi
+      current_major="${current%%.*}"; latest_major="${target%%.*}"
+      if [ "$latest_major" -gt "$current_major" ]; then
+        if [ "$RH_AUTOFIX_CLI" = "1" ] && update_cli "$tool" "$path" "$target"; then
+          AUTOFIXED[${#AUTOFIXED[@]}]="$tool — メジャー版遅れ $current → $target を自動更新"
+        else
+          add_warning "$tool — メジャー版が遅れています $current → $target${wait_note}"
           [ "$tool" != "claude" ] || real_path_of "$path" >> "$TMP_DIR/cli-major-warned.claude"
         fi
       else
-        CLI_UPDATES[${#CLI_UPDATES[@]}]="$tool — $current → $latest"
+        CLI_UPDATES[${#CLI_UPDATES[@]}]="$tool — $current → $target${wait_note}"
       fi
     elif [ "$current" != "$latest" ]; then
       NOTES[${#NOTES[@]}]="$tool — 公開最新版より先行（現在 $current / 公開 ${latest}）"
@@ -2308,12 +2437,654 @@ check_kit_update() {
   fi
 }
 
+software_is_ignored() {
+  local wanted="$1" ignored
+  for ignored in "${RH_SOFTWARE_IGNORE[@]+"${RH_SOFTWARE_IGNORE[@]}"}"; do
+    [ "$wanted" != "$ignored" ] || return 0
+  done
+  return 1
+}
+
+software_is_cli_managed() {
+  local kind="$1" name="$2" tool
+  for tool in $SOFTWARE_SKIP_TOOLS_EFFECTIVE; do
+    case "$tool:$kind:$name" in
+      claude:formula:claude-code|claude:cask:claude-code|claude:npm:@anthropic-ai/claude-code) return 0 ;;
+      codex:formula:codex|codex:cask:codex|codex:npm:@openai/codex) return 0 ;;
+      node:formula:node|node:formula:node@*) return 0 ;;
+      npm:npm:npm) return 0 ;;
+      gh:formula:gh) return 0 ;;
+      vercel:formula:vercel|vercel:npm:vercel) return 0 ;;
+      supabase:formula:supabase|supabase:formula:*/supabase|supabase:npm:supabase) return 0 ;;
+      op:cask:1password-cli) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+software_make_app_inventory() {
+  local output="$1" plutil_cmd app plist folder display bundle version receipt
+  local apps
+  : > "$output"
+  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
+  [ -n "$plutil_cmd" ] || return
+  apps="$TMP_DIR/software-app-bundles.list"
+  list_app_bundles | awk 'NF && !seen[$0]++' > "$apps"
+  while IFS= read -r app; do
+    plist="$app/Contents/Info.plist"
+    [ -f "$plist" ] || continue
+    folder="${app##*/}"
+    display="${folder%.app}"
+    bundle="$("$plutil_cmd" -extract CFBundleIdentifier raw -o - "$plist" 2>/dev/null || true)"
+    version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+    if [ -z "$version" ]; then
+      version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+    fi
+    receipt=0
+    [ ! -e "$app/Contents/_MASReceipt" ] || receipt=1
+    folder="$(printf '%s' "$folder" | tr '\t\n' '  ')"
+    display="$(printf '%s' "$display" | tr '\t\n' '  ')"
+    bundle="$(printf '%s' "$bundle" | tr '\t\n' '  ')"
+    version="$(printf '%s' "$version" | tr '\t\n' '  ')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$folder" "$display" "${bundle:--}" "${version:--}" "$receipt" >> "$output"
+  done < "$apps"
+}
+
+software_prepare_catalog() {
+  local cache="$STATE_DIR/cask-catalog.json" download="$TMP_DIR/cask-catalog.download"
+  SOFTWARE_CATALOG=""
+  if [ -n "${RH_CASK_CATALOG+x}" ]; then
+    if [ -f "$RH_CASK_CATALOG" ] \
+      && python3 -I - "$RH_CASK_CATALOG" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, list):
+    raise SystemExit(1)
+PY
+    then
+      SOFTWARE_CATALOG="$RH_CASK_CATALOG"
+      return 0
+    fi
+    NOTES[${#NOTES[@]}]="Homebrew で入れていないアプリの更新確認は未検査（目録を取得できません）"
+    return 1
+  fi
+  if [ -f "$cache" ] && find "$cache" -mmin -1200 -print 2>/dev/null | grep -q .; then
+    SOFTWARE_CATALOG="$cache"
+    return 0
+  fi
+  if run_timeout 120 curl -fsS https://formulae.brew.sh/api/cask.json > "$download" 2>/dev/null \
+    && python3 -I - "$download" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, list):
+    raise SystemExit(1)
+PY
+  then
+    chmod 600 "$download" 2>/dev/null || true
+    mv "$download" "$cache"
+    SOFTWARE_CATALOG="$cache"
+    return 0
+  fi
+  if [ -f "$cache" ] && find "$cache" -mtime -7 -print 2>/dev/null | grep -q .; then
+    SOFTWARE_CATALOG="$cache"
+    return 0
+  fi
+  NOTES[${#NOTES[@]}]="Homebrew で入れていないアプリの更新確認は未検査（目録を取得できません）"
+  return 1
+}
+
+check_installed_software() {
+  local app_inventory="$TMP_DIR/software-apps.tsv" raw_updates="$TMP_DIR/software-updates.tsv"
+  local filtered_updates="$TMP_DIR/software-updates-filtered.tsv"
+  local brew_json="$TMP_DIR/software-brew-outdated.json" brew_rows="$TMP_DIR/software-brew.tsv"
+  local cask_info="$TMP_DIR/software-cask-info.json" cask_rows="$TMP_DIR/software-casks.tsv"
+  local cask_managed="$TMP_DIR/software-cask-managed.tsv" auto_candidates="$TMP_DIR/software-auto.tsv"
+  local fixed_keys="$TMP_DIR/software-fixed.keys" remaining_keys="$TMP_DIR/software-remaining.keys"
+  local catalog_rows="$TMP_DIR/software-catalog.tsv" catalog_stats="$TMP_DIR/software-catalog-count"
+  local mas_rows="$TMP_DIR/software-mas.tsv" npm_json="$TMP_DIR/software-npm.json"
+  local npm_rows="$TMP_DIR/software-npm.tsv" state_file="$STATE_DIR/software-outdated.tsv"
+  local state_new="$TMP_DIR/software-state.tsv" dated_rows="$TMP_DIR/software-dated.tsv"
+  local kind name installed latest remedy key display auto_updates has_app present app_version
+  local target wait_suffix package current days today failed_names item
+  local mas_cmd
+  local homebrew_checked=0 app_checked=0 mas_checked=0 npm_checked=0 mas_installed=0
+  local attempted_upgrade=0 formula_rc=0 cask_rc=0 app_candidates=0
+  SOFTWARE_SKIP_TOOLS_EFFECTIVE="$RH_SOFTWARE_SKIP_TOOLS"
+  if [ "$RH_SECURITY_ONLY" != "1" ] && [ "$RH_SKIP_CLI" != "1" ]; then
+    SOFTWARE_SKIP_TOOLS_EFFECTIVE="$SOFTWARE_SKIP_TOOLS_EFFECTIVE claude codex node npm gh vercel supabase op"
+  fi
+  if [ "$RH_SKIP_SOFTWARE" = "1" ]; then
+    NOTES[${#NOTES[@]}]="入っているソフトの更新確認は未検査"
+    return
+  fi
+
+  : > "$raw_updates"
+  : > "$auto_candidates"
+  : > "$fixed_keys"
+  : > "$cask_managed"
+  software_make_app_inventory "$app_inventory"
+
+  if command -v brew >/dev/null 2>&1; then
+    if ! run_timeout 300 brew outdated --greedy --json=v2 > "$brew_json" 2>/dev/null; then
+      NOTES[${#NOTES[@]}]="入っているソフトの Homebrew 更新確認は未検査"
+    elif python3 -I - "$brew_json" > "$brew_rows" 2>/dev/null <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+for kind, source in (("formula", data.get("formulae", [])), ("cask", data.get("casks", []))):
+    if not isinstance(source, list):
+        raise SystemExit(1)
+    for entry in source:
+        if not isinstance(entry, dict) or entry.get("pinned"):
+            continue
+        name = str(entry.get("name") or entry.get("token") or "")
+        versions = entry.get("installed_versions", [])
+        if not isinstance(versions, list):
+            versions = [versions]
+        current = entry.get("current_version") or entry.get("version") or "不明"
+        if str(current).lower() == "latest" or any(str(value).lower() == "latest" for value in versions):
+            continue
+        old = ",".join(str(value) for value in versions if value not in (None, "")) or "不明"
+        if name:
+            print(f"{kind}\t{name}\t{old}\t{current}")
+PY
+    then
+      while IFS=$'\t' read -r kind name installed latest; do
+        [ "$kind" = "formula" ] || continue
+        software_is_ignored "$name" && continue
+        software_is_cli_managed formula "$name" && continue
+        # セキュリティ部品として ① に WARN 済みのものは、③ に重ねて出さず自動更新もしない
+        if [ -s "$TMP_DIR/brew-security-warned.list" ] && grep -Fqx "$name" "$TMP_DIR/brew-security-warned.list"; then
+          continue
+        fi
+        homebrew_checked=$((homebrew_checked + 1))
+        remedy="brew upgrade $name"
+        printf 'formula:%s\tHomebrew\t%s\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" "$remedy" >> "$raw_updates"
+        printf 'formula:%s\tformula\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" >> "$auto_candidates"
+      done < "$brew_rows"
+
+      set --
+      while IFS=$'\t' read -r kind name _installed _latest; do
+        [ "$kind" = "cask" ] || continue
+        software_is_ignored "$name" && continue
+        software_is_cli_managed cask "$name" && continue
+        set -- "$@" "$name"
+      done < "$brew_rows"
+      if [ "$#" -gt 0 ]; then
+        if run_timeout 300 brew info --cask --json=v2 "$@" > "$cask_info" 2>/dev/null \
+          && python3 -I - "$cask_info" "$brew_rows" "$app_inventory" "$cask_managed" > "$cask_rows" 2>/dev/null <<'PY'
+import json
+import plistlib
+import re
+import sys
+from pathlib import Path
+
+
+def values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from values(item)
+
+
+def version_numbers(value):
+    return tuple(int(part) for part in re.findall(r"\d+", str(value).split(",", 1)[0]))
+
+
+def build_numbers(app_path, short):
+    # Office は表示版 16.114.1・ビルド 16.114.26102031 で、目録はビルドの方を載せる。
+    # 先頭2つが表示版と同じ3桁以上のビルドだけ使う（Chrome の 8078.48 等を誤って使わない）
+    try:
+        with open(Path(app_path) / "Contents" / "Info.plist", "rb") as handle:
+            build = plistlib.load(handle).get("CFBundleVersion")
+    except Exception:
+        return ()
+    parts = version_numbers(build or "")
+    short_parts = version_numbers(short)
+    if len(parts) >= 3 and len(short_parts) >= 2 and parts[:2] == short_parts[:2]:
+        return parts
+    return ()
+
+
+def version_ge(left, right, app_path=None):
+    left_parts = version_numbers(left)
+    right_parts = version_numbers(right)
+    if not left_parts or not right_parts:
+        return False
+    length = min(len(left_parts), len(right_parts))
+    if left_parts[:length] >= right_parts[:length]:
+        return True
+    build = build_numbers(app_path, left) if app_path else ()
+    length = min(len(build), len(right_parts))
+    return bool(build) and build[:length] >= right_parts[:length]
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+outdated = {}
+with open(sys.argv[2], encoding="utf-8") as handle:
+    for raw in handle:
+        parts = raw.rstrip("\n").split("\t")
+        if len(parts) == 4 and parts[0] == "cask":
+            outdated[parts[1]] = parts[2:]
+apps = {}
+bundles = {}
+with open(sys.argv[3], encoding="utf-8") as handle:
+    for raw in handle:
+        parts = raw.rstrip("\n").split("\t")
+        if len(parts) != 6:
+            continue
+        apps[parts[1]] = parts
+        if parts[3] != "-":
+            bundles[parts[3]] = parts
+casks = data.get("casks", []) if isinstance(data, dict) else []
+if not isinstance(casks, list):
+    raise SystemExit(1)
+managed = []
+for cask in casks:
+    if not isinstance(cask, dict):
+        continue
+    token = str(cask.get("token") or cask.get("name") or "")
+    if token not in outdated:
+        continue
+    app_names = []
+    quit_ids = []
+    deleted_apps = []
+    installs_pkg = False
+    for artifact in cask.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        if "app" in artifact:
+            app_names.extend(Path(value).name for value in values(artifact["app"]))
+        # pkg 形式（zoom・Google Drive など）は更新に管理者パスワードが要るので自動更新しない
+        if "pkg" in artifact or "installer" in artifact:
+            installs_pkg = True
+        uninstall = artifact.get("uninstall")
+        for entry in uninstall if isinstance(uninstall, list) else [uninstall]:
+            if not isinstance(entry, dict):
+                continue
+            if "quit" in entry:
+                quit_ids.extend(values(entry["quit"]))
+            if "delete" in entry:
+                deleted_apps.extend(
+                    Path(value).name for value in values(entry["delete"])
+                    if value.startswith("/Applications/") and value.endswith(".app")
+                )
+    for app_name in app_names + deleted_apps:
+        managed.append(("app", app_name))
+    for bundle in quit_ids:
+        managed.append(("bundle", bundle))
+    installed, latest = outdated[token]
+    found = next((apps[name] for name in app_names + deleted_apps if name in apps), None)
+    if found is None:
+        found = next((bundles[bundle] for bundle in quit_ids if bundle in bundles), None)
+    actual = found[4] if found is not None else "-"
+    # pkg 形式でアプリ名が目録に無いものは、見つからなくても「記録だけ」とは言い切らない
+    present = "1" if found is not None or (installs_pkg and not app_names) else "0"
+    has_app = "1" if app_names or installs_pkg else "0"
+    auto_updates = "1" if cask.get("auto_updates") else "0"
+    updated = "1" if found is not None and version_ge(actual, latest, found[0]) else "0"
+    print(f"{token}\t{installed}\t{latest}\t{auto_updates}\t{has_app}\t{present}\t{actual}\t{updated}")
+with open(sys.argv[4], "w", encoding="utf-8") as handle:
+    for kind, value in managed:
+        handle.write(f"{kind}\t{value}\n")
+PY
+        then
+          while IFS=$'\t' read -r name installed latest auto_updates has_app present app_version item; do
+            homebrew_checked=$((homebrew_checked + 1))
+            if [ "$has_app" = "1" ] && [ "$present" = "0" ]; then
+              NOTES[${#NOTES[@]}]="$name は Homebrew の記録だけ残っています（アプリは見当たりません）。記録を消すなら brew uninstall --cask $name"
+              continue
+            fi
+            if [ "$has_app" = "1" ] && [ "$item" = "1" ]; then
+              security_detail "$name は Homebrew の記録は古いがアプリは更新済み（${app_version}）"
+              continue
+            fi
+            if [ "$has_app" = "1" ]; then
+              if [ "$auto_updates" = "1" ]; then
+                remedy="アプリの「更新を確認」から（brew upgrade --cask $name でも可。アプリが一度終了します）"
+              else
+                remedy="brew upgrade --cask $name"
+              fi
+              printf 'cask:%s\tHomebrew のアプリ\t%s\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" "$remedy" >> "$raw_updates"
+            else
+              remedy="brew upgrade --cask $name"
+              printf 'cask:%s\tHomebrew\t%s\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" "$remedy" >> "$raw_updates"
+              printf 'cask:%s\tcask\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" >> "$auto_candidates"
+            fi
+          done < "$cask_rows"
+        else
+          NOTES[${#NOTES[@]}]="入っているソフトの Homebrew cask 更新確認は未検査"
+        fi
+      fi
+    else
+      NOTES[${#NOTES[@]}]="入っているソフトの Homebrew 更新確認は未検査（応答不正）"
+    fi
+  fi
+
+  while IFS=$'\t' read -r _item _name _display _bundle _version item; do
+    [ "$item" = "0" ] || continue
+    case "$_bundle" in com.apple.*) continue ;; esac
+    app_candidates=$((app_candidates + 1))
+  done < "$app_inventory"
+  if [ "$app_candidates" -gt 0 ] && software_prepare_catalog; then
+    python3 -I - "$SOFTWARE_CATALOG" "$app_inventory" "$cask_managed" "$catalog_stats" > "$catalog_rows" 2>/dev/null <<'PY'
+import json
+import plistlib
+import re
+import sys
+from pathlib import Path
+
+
+def values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from values(item)
+
+
+def numbers(value):
+    return tuple(int(part) for part in re.findall(r"\d+", str(value).split(",", 1)[0]))
+
+
+def build_numbers(app_path, short):
+    # 表示版とビルドで書式が違うアプリ（Office）向け。条件は Homebrew 側の同名関数と同じ
+    try:
+        with open(Path(app_path) / "Contents" / "Info.plist", "rb") as handle:
+            build = plistlib.load(handle).get("CFBundleVersion")
+    except Exception:
+        return ()
+    parts = numbers(build or "")
+    short_parts = numbers(short)
+    if len(parts) >= 3 and len(short_parts) >= 2 and parts[:2] == short_parts[:2]:
+        return parts
+    return ()
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    catalog = json.load(handle)
+managed_names = set()
+managed_bundles = set()
+try:
+    with open(sys.argv[3], encoding="utf-8") as handle:
+        for raw in handle:
+            kind, _, value = raw.rstrip("\n").partition("\t")
+            (managed_names if kind == "app" else managed_bundles).add(value)
+except FileNotFoundError:
+    pass
+by_name = {}
+by_bundle = {}
+by_deleted = {}
+for cask in catalog:
+    if not isinstance(cask, dict):
+        continue
+    token = str(cask.get("token") or "")
+    version = str(cask.get("version") or "")
+    for artifact in cask.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        if "app" in artifact:
+            for value in values(artifact["app"]):
+                by_name.setdefault(Path(value).name, (token, version))
+        uninstall = artifact.get("uninstall")
+        entries = uninstall if isinstance(uninstall, list) else [uninstall]
+        for entry in entries:
+            if isinstance(entry, dict) and "quit" in entry:
+                for value in values(entry["quit"]):
+                    by_bundle.setdefault(value, (token, version))
+            # zoom のように app も quit も無く、削除対象にだけアプリ名が載る cask がある
+            if isinstance(entry, dict) and "delete" in entry:
+                for value in values(entry["delete"]):
+                    if value.startswith("/Applications/") and value.endswith(".app"):
+                        by_deleted.setdefault(Path(value).name, (token, version))
+checked = 0
+with open(sys.argv[2], encoding="utf-8") as handle:
+    for raw in handle:
+        parts = raw.rstrip("\n").split("\t")
+        if len(parts) != 6:
+            continue
+        _path, folder, display, bundle, current, receipt = parts
+        if receipt == "1" or bundle.startswith("com.apple."):
+            continue
+        if folder in managed_names or bundle in managed_bundles:
+            continue
+        match = by_name.get(folder)
+        if match is None and bundle != "-":
+            match = by_bundle.get(bundle)
+        if match is None:
+            match = by_deleted.get(folder)
+        if match is None:
+            continue
+        token, latest = match
+        left = numbers(current)
+        right = numbers(latest)
+        if not left or not right or latest.lower() == "latest":
+            continue
+        checked += 1
+        length = min(len(left), len(right))
+        if left[:length] < right[:length]:
+            build = build_numbers(_path, current)
+            if build and build[:min(len(build), len(right))] >= right[:min(len(build), len(right))]:
+                continue
+            print(f"app:{bundle if bundle != '-' else folder}\t{display}\t{current}\t{latest}\t{token}")
+with open(sys.argv[4], "w", encoding="utf-8") as handle:
+    handle.write(str(checked) + "\n")
+PY
+    if [ -f "$catalog_stats" ]; then read -r app_checked < "$catalog_stats" || app_checked=0; fi
+    while IFS=$'\t' read -r key display current latest name; do
+      software_is_ignored "$display" && continue
+      remedy="アプリの「更新を確認」から（Homebrew の目録 $name の版と比べた参考値です）"
+      printf '%s\tアプリ\t%s\t%s\t%s\t%s\n' "$key" "$display" "$current" "$latest" "$remedy" >> "$raw_updates"
+    done < "$catalog_rows"
+  fi
+
+  mas_installed="$(awk -F '\t' '$6 == 1 {count++} END {print count+0}' "$app_inventory")"
+  mas_cmd="${RH_MAS-}"
+  if [ -z "${RH_MAS+x}" ]; then mas_cmd="$(command -v mas 2>/dev/null || true)"; fi
+  if [ -n "$mas_cmd" ] && [ -x "$mas_cmd" ]; then
+    run_timeout 120 "$mas_cmd" outdated > "$mas_rows" 2>/dev/null || true
+    while IFS=$'\t' read -r key display current latest; do
+      software_is_ignored "$display" && continue
+      mas_checked=$((mas_checked + 1))
+      printf 'mas:%s\tApp Store\t%s\t%s\t%s\tApp Store の「アップデート」から\n' "$key" "$display" "$current" "$latest" >> "$raw_updates"
+    done < <(python3 -I - "$mas_rows" 2>/dev/null <<'PY'
+import re
+import sys
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    for raw in handle:
+        match = re.match(r"^\s*(\d+)\s+(.+?)\s+\(([^ ]+)\s+->\s+([^)]+)\)\s*$", raw)
+        if match:
+            print("\t".join(match.groups()))
+PY
+    )
+    [ "$mas_checked" -ge "$mas_installed" ] || mas_checked="$mas_installed"
+  elif [ "$mas_installed" -gt 0 ]; then
+    mas_checked="$mas_installed"
+    NOTES[${#NOTES[@]}]="App Store のアプリ ${mas_installed} 件は未検査（App Store の「アップデート」で確認できます。brew install mas で点検に入ります）"
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    run_timeout 120 npm outdated -g --json > "$npm_json" 2>/dev/null || true
+    if python3 -I - "$npm_json" > "$npm_rows" 2>/dev/null <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data, dict):
+    raise SystemExit(1)
+for name, info in data.items():
+    if not isinstance(info, dict):
+        continue
+    current = str(info.get("current") or "")
+    latest = str(info.get("latest") or "")
+    if current and latest and current != latest:
+        print(f"{name}\t{current}\t{latest}")
+PY
+    then
+      while IFS=$'\t' read -r package current latest; do
+        software_is_ignored "$package" && continue
+        software_is_cli_managed npm "$package" && continue
+        npm_checked=$((npm_checked + 1))
+        if ! npm_release_info "$package" "$current"; then
+          NOTES[${#NOTES[@]}]="npm $package の公開日を取得できず未検査"
+          continue
+        fi
+        target="$NPM_TARGET"
+        if [ -n "$target" ] && version_less_than "$current" "$target"; then
+          wait_suffix=""
+          if [ "$NPM_LATEST_WAIT" = "1" ] && [ "$NPM_LATEST" != "$target" ]; then
+            wait_suffix="。最新 $NPM_LATEST は $NPM_LATEST_DATE 公開・3 日待ち"
+          fi
+          remedy="npm i -g ${package}@${target}${wait_suffix}"
+          printf 'npm:%s\tnpm\t%s\t%s\t%s\t%s\n' "$package" "$package" "$current" "$target" "$remedy" >> "$raw_updates"
+        elif [ "$NPM_LATEST_WAIT" = "1" ] && version_less_than "$current" "$NPM_LATEST"; then
+          security_detail "$package の最新 $NPM_LATEST は公開から 3 日たっていないので待ちます"
+        fi
+      done < "$npm_rows"
+    else
+      NOTES[${#NOTES[@]}]="npm のグローバル更新確認は未検査"
+    fi
+  fi
+
+  if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] && [ -s "$auto_candidates" ]; then
+    set --
+    while IFS=$'\t' read -r _key kind name _installed _latest; do
+      [ "$kind" = "formula" ] || continue
+      set -- "$@" "$name"
+    done < "$auto_candidates"
+    if [ "$#" -gt 0 ]; then
+      attempted_upgrade=1
+      HOMEBREW_NO_INSTALL_CLEANUP=1 run_timeout 900 brew upgrade --formula "$@" >/dev/null 2>&1 || formula_rc=$?
+    fi
+    set --
+    while IFS=$'\t' read -r _key kind name _installed _latest; do
+      [ "$kind" = "cask" ] || continue
+      set -- "$@" "$name"
+    done < "$auto_candidates"
+    if [ "$#" -gt 0 ]; then
+      attempted_upgrade=1
+      HOMEBREW_NO_INSTALL_CLEANUP=1 run_timeout 900 brew upgrade --cask "$@" >/dev/null 2>&1 || cask_rc=$?
+    fi
+    if [ "$attempted_upgrade" = "1" ] && run_timeout 300 brew outdated --greedy --json=v2 > "$brew_json" 2>/dev/null \
+      && python3 -I - "$brew_json" > "$remaining_keys" 2>/dev/null <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+for kind, source in (("formula", data.get("formulae", [])), ("cask", data.get("casks", []))):
+    for entry in source if isinstance(source, list) else []:
+        if isinstance(entry, dict):
+            name = entry.get("name") or entry.get("token")
+            if name:
+                print(f"{kind}:{name}")
+PY
+    then
+      failed_names=""
+      while IFS=$'\t' read -r key kind name installed latest; do
+        if grep -Fqx "$key" "$remaining_keys"; then
+          if [ -z "$failed_names" ]; then failed_names="$name"; else failed_names="$failed_names $name"; fi
+        else
+          printf '%s\n' "$key" >> "$fixed_keys"
+          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: $name $installed → $latest"
+        fi
+      done < "$auto_candidates"
+      [ -z "$failed_names" ] || add_warning "Homebrew の自動更新に失敗: $failed_names"
+    else
+      while IFS=$'\t' read -r _key _kind name _installed _latest; do
+        if [ -z "$failed_names" ]; then failed_names="$name"; else failed_names="$failed_names $name"; fi
+      done < "$auto_candidates"
+      [ -z "$failed_names" ] || add_warning "Homebrew の自動更新に失敗: $failed_names"
+    fi
+    if [ "$attempted_upgrade" = "1" ] && command -v node >/dev/null 2>&1 \
+      && ! run_timeout 20 node --version >/dev/null 2>&1; then
+      run_timeout 900 brew reinstall node >/dev/null 2>&1 || true
+      if ! run_timeout 20 node --version >/dev/null 2>&1; then
+        add_warning "Homebrew の自動更新のあと node が起動しません（brew reinstall node を確認）"
+      fi
+    fi
+  fi
+  : "$formula_rc" "$cask_rc"
+
+  : > "$filtered_updates"
+  while IFS=$'\t' read -r key kind display installed latest remedy; do
+    if [ -s "$fixed_keys" ] && grep -Fqx "$key" "$fixed_keys"; then
+      continue
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$key" "$kind" "$display" "$installed" "$latest" "$remedy" >> "$filtered_updates"
+  done < "$raw_updates"
+
+  today="${RH_TODAY:-$(TZ=Asia/Tokyo date +%F)}"
+  python3 -I - "$state_file" "$filtered_updates" "$today" "$state_new" > "$dated_rows" 2>/dev/null <<'PY'
+import sys
+from datetime import date
+
+state_path, updates_path, today_raw, new_state = sys.argv[1:]
+today = date.fromisoformat(today_raw)
+first_seen = {}
+try:
+    with open(state_path, encoding="utf-8") as handle:
+        for raw in handle:
+            key, sep, value = raw.rstrip("\n").partition("\t")
+            if not sep:
+                continue
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                continue
+            first_seen[key] = value
+except FileNotFoundError:
+    pass
+rows = []
+with open(updates_path, encoding="utf-8") as handle:
+    for raw in handle:
+        parts = raw.rstrip("\n").split("\t")
+        if len(parts) != 6:
+            continue
+        first = first_seen.get(parts[0], today_raw)
+        days = max(0, (today - date.fromisoformat(first)).days)
+        rows.append((parts, first, days))
+with open(new_state, "w", encoding="utf-8") as handle:
+    for parts, first, _days in rows:
+        handle.write(f"{parts[0]}\t{first}\n")
+for parts, _first, days in rows:
+    print("\t".join(parts + [str(days)]))
+PY
+  if [ -f "$state_new" ]; then
+    chmod 600 "$state_new" 2>/dev/null || true
+    mv "$state_new" "$state_file"
+  fi
+  while IFS=$'\t' read -r _key kind display installed latest remedy days; do
+    if [ "$days" -ge "$RH_SOFTWARE_STALE_DAYS" ]; then
+      add_warning "$display の更新が $days 日止まっています $installed → ${latest}（${remedy}）"
+    else
+      SOFTWARE_UPDATES[${#SOFTWARE_UPDATES[@]}]="$kind $display $installed → ${latest}（${remedy}）"
+    fi
+  done < "$dated_rows"
+
+  security_detail "入っているソフト — Homebrew ${homebrew_checked}・アプリ ${app_checked}・App Store ${mas_checked}・npm ${npm_checked} 件を確認"
+}
+
 check_mac_security() {
   if [ "$RH_SKIP_SECURITY" = "1" ]; then
     NOTES[${#NOTES[@]}]="Mac のセキュリティ点検は RH_SKIP_SECURITY=1 のため未検査"
     return
   fi
   check_brew_security
+  check_installed_software
   check_minimum_versions php
   check_minimum_versions node
   check_java_versions
@@ -2472,14 +3243,16 @@ generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
   printf '\n## ② 自動で直したもの\n\n'
   if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf 'なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf -- '- %s\n' "$item"; done; fi
   if [ "$RH_SECURITY_ONLY" = "1" ]; then
-    printf '\n## ③ 参考（Mac のセキュリティ）\n\n'
+    printf '\n## ③ 参考（Mac のセキュリティ・ソフト更新）\n\n'
   else
-    printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ）\n\n'
+    printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ・ソフト更新）\n\n'
     printf -- '- 作業中: %s件\n- 同期待ち: %s件\n- CLI 更新あり: %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
     for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$item"; done
     for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$item"; done
     for item in "${CLI_UPDATES[@]+"${CLI_UPDATES[@]}"}"; do printf -- '- %s\n' "$item"; done
   fi
+  printf -- '- ソフト更新あり: %s件\n' "${#SOFTWARE_UPDATES[@]}"
+  for item in "${SOFTWARE_UPDATES[@]+"${SOFTWARE_UPDATES[@]}"}"; do printf -- '- ソフト更新: %s\n' "$item"; done
   for item in "${NOTES[@]+"${NOTES[@]}"}"; do printf -- '- %s\n' "$item"; done
   printf "\n## ④ 全文の場所\n\n- 最新: \`%s\`\n- 履歴: \`%s\`\n" "$REPORT" "$LOG_FILE"
   printf '\n---\n\n## 点検詳細\n\n'
@@ -2516,9 +3289,9 @@ if [ $((fail_count + warn_count)) -gt 0 ]; then
       printf '\n■ 自動で直したもの\n'
       if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf '  なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf '  - %s\n' "$item"; done; fi
       if [ "$RH_SECURITY_ONLY" = "1" ]; then
-        printf '\n■ 参考\n'
+        printf '\n■ 参考\n  ソフト更新あり %s件\n' "${#SOFTWARE_UPDATES[@]}"
       else
-        printf '\n■ 参考\n  作業中 %s件 / 同期待ち %s件 / CLI 更新あり %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
+        printf '\n■ 参考\n  作業中 %s件 / 同期待ち %s件 / CLI 更新あり %s件 / ソフト更新あり %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}" "${#SOFTWARE_UPDATES[@]}"
       fi
       printf '\n■ 全文の場所\n  %s\n' "$REPORT"
     } > "$mail_body"

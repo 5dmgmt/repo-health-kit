@@ -74,6 +74,7 @@ run_security() {
     RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=0 \
     RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
+    RH_SKIP_SOFTWARE=1 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
     RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
     RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= RH_BUN_CANDIDATES= \
@@ -100,14 +101,43 @@ make_fake_brew() {
     printf '%s\n' '#!/bin/bash'
     printf '%s\n' 'case "${1:-}" in'
     printf '%s\n' '  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;'
-    printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[]}'\''; fi ;;'
-    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
+    printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_AFTER_JSON-}" ] && [ -s "${FAKE_BREW_LOG:-/dev/null}" ]; then printf "%s\n" "$FAKE_BREW_AFTER_JSON"; elif [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi ;;'
+    printf '%s\n' '  info) if [ "${2:-}" = "--cask" ]; then if [ -n "${FAKE_BREW_CASK_INFO_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_CASK_INFO_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi; else exit 1; fi ;;'
+    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; printf "cleanup=%s\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
+    printf '%s\n' '  reinstall) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;'
     printf '%s\n' '  list) printf "%b" "${FAKE_BREW_VERSIONS-}" | while IFS= read -r line; do case "$line" in "$3 "*) printf "%s\n" "$line";; esac; done ;;'
     printf '%s\n' '  --prefix) printf "%s\n" "${FAKE_BREW_PREFIX:-/fake/homebrew}" ;;'
     printf '%s\n' '  *) exit 1 ;;'
     printf '%s\n' 'esac'
   } > "$fake_bin/brew"
   chmod +x "$fake_bin/brew"
+}
+
+make_fake_software_npm() {
+  local fake_bin="$1"
+  mkdir -p "$fake_bin"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'if [ "${1:-}" = "outdated" ] && [ "${2:-}" = "-g" ]; then if [ -n "${FAKE_NPM_OUTDATED_JSON-}" ]; then printf "%s\n" "$FAKE_NPM_OUTDATED_JSON"; else printf "%s\n" "{}"; fi; exit "${FAKE_NPM_OUTDATED_RC:-0}"; fi'
+    printf '%s\n' 'if [ "${1:-}" = "view" ] && [ "${3:-}" = "time" ]; then'
+    printf '%s\n' '  case "${2:-}" in oldpkg) printf "%s\n" "${FAKE_NPM_OLD_TIME_JSON:?}";; youngpkg) printf "%s\n" "${FAKE_NPM_YOUNG_TIME_JSON:?}";; *) if [ -n "${FAKE_NPM_TIME_JSON-}" ]; then printf "%s\n" "$FAKE_NPM_TIME_JSON"; else printf "%s\n" '\''{"1.0.0":"2020-01-01T00:00:00Z"}'\''; fi;; esac'
+    printf '%s\n' '  exit 0'
+    printf '%s\n' 'fi'
+    printf '%s\n' 'if [ "${1:-}" = "--version" ]; then printf "%s\n" "1.0.0"; exit 0; fi'
+    printf '%s\n' 'exit 1'
+  } > "$fake_bin/npm"
+  chmod +x "$fake_bin/npm"
+}
+
+make_fake_mas() {
+  local path="$1"
+  mkdir -p "${path%/*}"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' '[ "${1:-}" = "outdated" ] || exit 1'
+    printf '%s\n' 'printf "%b" "${FAKE_MAS_OUTDATED-}"'
+  } > "$path"
+  chmod +x "$path"
 }
 
 make_fake_php() {
@@ -206,7 +236,7 @@ run_composer() {
     RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..192\n'
+printf '1..275\n'
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -386,6 +416,22 @@ run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"}]}'
 assert_contains 'ca-certificates と node のうち ca は自動更新する' "$case_dir/output.txt" 'ca-certificates .*を自動更新'
 assert_contains 'RH_AUTOFIX_SECURITY=0 では node を WARN にする' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0'
+
+case_dir="$TEST_TMP/security-node-software-dedupe"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+mkdir -p "$case_dir"
+printf '[]\n' > "$case_dir/catalog.json"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_CA_CERTS=0 RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+assert_contains 'セキュリティ部品の WARN はそのまま出す' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0'
+assert_not_contains 'WARN 済みのセキュリティ部品はソフト更新に重ねない' "$case_dir/output.txt" 'ソフト更新: Homebrew node'
+assert_not_contains 'WARN 済みのセキュリティ部品はソフト側で自動更新しない' "$case_dir/brew.log" 'upgrade --formula .*node'
+assert_contains 'セキュリティ部品以外の formula はソフト側で自動更新する' "$case_dir/brew.log" 'upgrade --formula rclone'
 
 case_dir="$TEST_TMP/security-node-auto"
 fake_bin="$case_dir/fake-bin"
@@ -916,7 +962,7 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.4\.4 → 0\.9\.0 があります'
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.5\.0 → 0\.9\.0 があります'
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"
@@ -1024,7 +1070,10 @@ make_fake_cli_set() {
   done
   {
     printf '%s\n' '#!/bin/bash'
-    printf '%s\n' 'if [ "${1:-}" = "view" ] && [ "${2:-}" = "@anthropic-ai/claude-code" ]; then printf "%s\n" "${FAKE_CLAUDE_LATEST:?}"; else printf "%s\n" "1.0.0"; fi'
+    printf '%s\n' 'if [ "${1:-}" = "view" ] && [ "${3:-}" = "time" ]; then'
+    printf '%s\n' '  if [ "${2:-}" = "@anthropic-ai/claude-code" ]; then latest="${FAKE_CLAUDE_LATEST:?}"; [ -z "${FAKE_CLAUDE_TIME_JSON-}" ] || { printf "%s\n" "$FAKE_CLAUDE_TIME_JSON"; exit 0; }; else latest="1.0.0"; fi'
+    printf '%s\n' '  printf "{\"%s\":\"2020-01-01T00:00:00.000Z\"}\n" "$latest"'
+    printf '%s\n' 'else printf "%s\n" "1.0.0"; fi'
   } > "$dir/npm"
   {
     printf '%s\n' '#!/bin/bash'
@@ -1046,7 +1095,7 @@ assert_not_contains '同じ claude の最低版の話は 2 度目の WARN にし
 assert_contains '2 度目に出さなかった最低版の話は detail に残す' "$case_dir/output.txt" 'Claude Code 2\.1\.250（.*）は修正版 2\.1\.260 より古い版です.*WARN は 1 件にまとめています'
 
 make_fake_app() {
-  local dir="$1" name="$2" bundle="$3" version="$4"
+  local dir="$1" name="$2" bundle="$3" version="$4" build="${5:-}"
   mkdir -p "$dir/$name.app/Contents"
   {
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1054,6 +1103,7 @@ make_fake_app() {
     printf '%s\n' '<plist version="1.0">' '<dict>'
     printf '<key>CFBundleIdentifier</key>\n<string>%s</string>\n' "$bundle"
     printf '<key>CFBundleShortVersionString</key>\n<string>%s</string>\n' "$version"
+    [ -z "$build" ] || printf '<key>CFBundleVersion</key>\n<string>%s</string>\n' "$build"
     printf '%s\n' '</dict>' '</plist>'
   } > "$dir/$name.app/Contents/Info.plist"
 }
@@ -1799,6 +1849,212 @@ printf 'app:com.example.sample\t*\t2.0.0\tテスト用\n' > "$minimums"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" RH_SECURITY_MINIMUMS="$minimums"
 assert_contains '判定表に基準日が無いときは未検査の NOTES' "$case_dir/output.txt" 'Electron 製アプリの更新確認は判定表に基準日（electron-after）が無いため未検査'
 assert_not_contains '基準日が無いときは Slack の NOTES を出さない' "$case_dir/output.txt" 'Slack .*より前の版のままかもしれません'
+
+# --- 0.5.0: 入っているソフトの更新点検 ---
+
+case_dir="$TEST_TMP/software-brew"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+catalog="$case_dir/catalog.json"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Old App' com.example.old 1.0.0
+make_fake_app "$apps" 'Self App' com.example.self 2.0.0
+printf '[]\n' > "$catalog"
+: > "$case_dir/brew.log"
+brew_json='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"},{"name":"pinned-tool","installed_versions":["1.0.0"],"current_version":"2.0.0","pinned":true}],"casks":[{"name":"old-app","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"self-app","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"ghost-app","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"latest-app","installed_versions":["latest"],"current_version":"latest"}]}'
+cask_info='{"formulae":[],"casks":[{"token":"old-app","auto_updates":true,"artifacts":[{"app":["Old App.app"]}]},{"token":"self-app","auto_updates":true,"artifacts":[{"app":["Self App.app"]}]},{"token":"ghost-app","auto_updates":false,"artifacts":[{"app":["Ghost App.app"]}]}]}'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON="$brew_json" FAKE_BREW_CASK_INFO_JSON="$cask_info"
+assert_contains 'Homebrew の更新は formula と古い GUI cask の2件' "$case_dir/output.txt" 'ソフト更新あり: 2件'
+assert_contains 'formula の更新を参考欄に出す' "$case_dir/output.txt" 'ソフト更新: Homebrew rclone 1\.74\.3 → 1\.75\.2（brew upgrade rclone）'
+assert_contains '古い GUI cask の更新を参考欄に出す' "$case_dir/output.txt" 'ソフト更新: Homebrew のアプリ old-app 1\.0\.0 → 2\.0\.0'
+assert_contains 'アプリが無い cask は記録だけの NOTES' "$case_dir/output.txt" 'ghost-app は Homebrew の記録だけ残っています（アプリは見当たりません）'
+assert_not_contains '自己更新済み cask はソフト更新に数えない' "$case_dir/output.txt" 'ソフト更新: .*self-app'
+assert_not_contains 'latest と pinned はソフト更新に数えない' "$case_dir/output.txt" 'ソフト更新: .*(latest-app|pinned-tool)'
+
+case_dir="$TEST_TMP/software-catalog"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+catalog="$case_dir/catalog.json"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Named App' com.example.named '7.1.9 (88375)'
+make_fake_app "$apps" 'Bundle App' com.example.bundle 1.0.0
+make_fake_app "$apps" 'Store App' com.example.store 1.0.0
+mkdir -p "$apps/Store App.app/Contents/_MASReceipt"
+make_fake_app "$apps" 'Apple App' com.apple.sample 1.0.0
+make_fake_app "$apps" 'Unknown App' com.example.unknown 1.0.0
+make_fake_app "$apps" 'Deleted App' com.example.deleted 1.0.0
+make_fake_app "$apps" 'Office App' com.example.office 16.114.1 16.114.26102031
+make_fake_app "$apps" 'Chrome App' com.example.chrome 156.0.8078.48 8078.48
+printf '%s\n' '[{"token":"office-token","version":"16.114.26102031","artifacts":[{"app":["Office App.app"]}]},{"token":"chrome-token","version":"156.0.8078.49","artifacts":[{"app":["Chrome App.app"]}]},{"token":"named-token","version":"7.2.2.88465","artifacts":[{"app":["Named App.app"]}]},{"token":"bundle-token","version":"2.0.0","artifacts":[{"uninstall":[{"quit":"com.example.bundle"}]}]},{"token":"store-token","version":"2.0.0","artifacts":[{"app":["Store App.app"]}]},{"token":"apple-token","version":"2.0.0","artifacts":[{"app":["Apple App.app"]}]},{"token":"deleted-token","version":"2.0.0","artifacts":[{"pkg":["Deleted.pkg"]},{"uninstall":[{"signal":["KILL","com.example.deleted"],"delete":["/Applications/Deleted App.app","/Library/Deleted"]}]}]}]' > "$catalog"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
+assert_contains 'cask 目録はアプリ名で照合する' "$case_dir/output.txt" 'ソフト更新: アプリ Named App 7\.1\.9 \(88375\) → 7\.2\.2\.88465'
+assert_contains 'cask 目録は bundle ID でも照合する' "$case_dir/output.txt" 'ソフト更新: アプリ Bundle App 1\.0\.0 → 2\.0\.0'
+assert_not_contains 'App Store と Apple 純正アプリは目録比較から外す' "$case_dir/output.txt" 'ソフト更新: アプリ (Store App|Apple App)'
+assert_not_contains '目録に当たらないアプリは更新扱いしない' "$case_dir/output.txt" 'ソフト更新: アプリ Unknown App'
+assert_contains 'cask 目録は削除対象のアプリ名でも照合する（zoom 型）' "$case_dir/output.txt" 'ソフト更新: アプリ Deleted App 1\.0\.0 → 2\.0\.0'
+assert_not_contains '表示版とビルドの書式が違うアプリはビルドで比べる（Office 型）' "$case_dir/output.txt" 'ソフト更新: アプリ Office App'
+assert_contains '表示版と頭の揃わないビルドは比較に使わない（Chrome 型）' "$case_dir/output.txt" 'ソフト更新: アプリ Chrome App 156\.0\.8078\.48 → 156\.0\.8078\.49'
+
+case_dir="$TEST_TMP/software-pkg-cask"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+catalog="$case_dir/catalog.json"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Pkg App' com.example.pkg 1.0.0
+printf '[]\n' > "$catalog"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON='{"formulae":[],"casks":[{"name":"pkg-app","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"pkg-only","installed_versions":["1.0.0"],"current_version":"2.0.0"}]}' \
+  FAKE_BREW_CASK_INFO_JSON='{"formulae":[],"casks":[{"token":"pkg-app","auto_updates":false,"artifacts":[{"pkg":["Pkg.pkg"]},{"uninstall":[{"delete":["/Applications/Pkg App.app"]}]}]},{"token":"pkg-only","auto_updates":false,"artifacts":[{"installer":[{"script":"install.sh"}]}]}]}'
+assert_contains 'pkg 形式の cask はアプリとして出す' "$case_dir/output.txt" 'ソフト更新: Homebrew のアプリ pkg-app 1\.0\.0 → 2\.0\.0'
+assert_contains 'アプリ名の無い pkg 形式も記録だけと言い切らない' "$case_dir/output.txt" 'ソフト更新: Homebrew のアプリ pkg-only 1\.0\.0 → 2\.0\.0'
+assert_not_contains 'pkg 形式の cask は自動更新しない' "$case_dir/brew.log" 'upgrade'
+
+case_dir="$TEST_TMP/software-catalog-missing"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Plain App' com.example.plain 1.0.0
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$case_dir/missing-catalog.json" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
+assert_contains 'cask 目録が無ければアプリ更新確認を未検査にする' "$case_dir/output.txt" 'Homebrew で入れていないアプリの更新確認は未検査（目録を取得できません）'
+
+case_dir="$TEST_TMP/software-mas"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_mas "$fake_bin/mas"
+make_fake_app "$apps" 'Store App' com.example.store 2.3.0
+mkdir -p "$apps/Store App.app/Contents/_MASReceipt"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_APP_DIRS="$apps" RH_MAS="$fake_bin/mas" FAKE_MAS_OUTDATED='123  Store App  (2.3.0 -> 2.3.2)\n' \
+  FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
+assert_contains 'mas outdated を App Store の更新として出す' "$case_dir/output.txt" 'ソフト更新: App Store Store App 2\.3\.0 → 2\.3\.2'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_APP_DIRS="$apps" RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
+assert_contains 'mas が無ければ App Store アプリ件数を未検査にする' "$case_dir/output.txt" 'App Store のアプリ 1 件は未検査'
+
+case_dir="$TEST_TMP/software-npm"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+npm_outdated='{"oldpkg":{"current":"1.0.0","latest":"3.0.0"},"youngpkg":{"current":"1.0.0","latest":"2.0.0"}}'
+old_times='{"1.0.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-02T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"}'
+young_times='{"1.0.0":"2020-01-01T00:00:00Z","2.0.0":"2999-01-01T00:00:00Z"}'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON='{"formulae":[],"casks":[]}' FAKE_NPM_OUTDATED_JSON="$npm_outdated" \
+  FAKE_NPM_OLD_TIME_JSON="$old_times" FAKE_NPM_YOUNG_TIME_JSON="$young_times"
+assert_contains 'npm は公開3日以上の一つ前の版を上げ先にする' "$case_dir/output.txt" 'ソフト更新: npm oldpkg 1\.0\.0 → 2\.0\.0（npm i -g oldpkg@2\.0\.0'
+assert_contains 'npm の最新が3日未満なら待つ旨を添える' "$case_dir/output.txt" '最新 3\.0\.0 は .*公開・3 日待ち'
+assert_not_contains '3日未満の版しかない npm は更新に数えない' "$case_dir/output.txt" 'ソフト更新: npm youngpkg'
+assert_contains '3日未満の版しかない npm は detail に残す' "$case_dir/output.txt" 'youngpkg の最新 2\.0\.0 は公開から 3 日たっていないので待ちます'
+
+case_dir="$TEST_TMP/software-stale-15"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+mkdir -p "$case_dir/state"
+printf 'formula:rclone\t2026-10-10\n' > "$case_dir/state/software-outdated.tsv"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-10-25 \
+  RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+assert_contains '15日止まったソフト更新は WARN' "$case_dir/output.txt" 'WARN  rclone の更新が 15 日止まっています 1\.74\.3 → 1\.75\.2'
+
+case_dir="$TEST_TMP/software-stale-13"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+mkdir -p "$case_dir/state"
+printf 'formula:rclone\t2026-10-12\n' > "$case_dir/state/software-outdated.tsv"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-10-25 \
+  RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+assert_not_contains '13日のソフト更新は WARN にしない' "$case_dir/output.txt" 'WARN  rclone の更新が'
+assert_contains '13日のソフト更新は参考欄に残す' "$case_dir/output.txt" 'ソフト更新: Homebrew rclone 1\.74\.3 → 1\.75\.2'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-10-26 \
+  RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
+assert_not_contains '遅れが消えた項目は状態ファイルから消す' "$case_dir/state/software-outdated.tsv" 'formula:rclone'
+
+case_dir="$TEST_TMP/software-autofix"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+catalog="$case_dir/catalog.json"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Old App' com.example.old 1.0.0
+printf '[]\n' > "$catalog"
+: > "$case_dir/brew.log"
+brew_json='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[{"name":"old-app","installed_versions":["1.0.0"],"current_version":"2.0.0"}]}'
+cask_info='{"formulae":[],"casks":[{"token":"old-app","auto_updates":false,"artifacts":[{"app":["Old App.app"]}]}]}'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON="$brew_json" FAKE_BREW_AFTER_JSON='{"formulae":[],"casks":[]}' FAKE_BREW_CASK_INFO_JSON="$cask_info"
+assert_contains '自動更新は formula を名指しする' "$case_dir/brew.log" '^upgrade --formula rclone$'
+assert_contains '自動更新は Homebrew cleanup を止める' "$case_dir/brew.log" '^cleanup=1$'
+assert_not_contains 'GUI の cask は自動更新しない' "$case_dir/brew.log" '^upgrade --cask old-app$'
+assert_contains '上がった formula は自動修復へ出す' "$case_dir/output.txt" 'Homebrew: rclone 1\.74\.3 → 1\.75\.2'
+assert_not_contains '上がった formula はソフト更新一覧から消す' "$case_dir/output.txt" 'ソフト更新: Homebrew rclone'
+
+case_dir="$TEST_TMP/software-skip"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 \
+  RH_MAS="$fake_bin/missing-mas" RH_SOFTWARE_SKIP_TOOLS='gh' RH_SOFTWARE_IGNORE='foo' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"gh","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"foo","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_not_contains 'RH_SOFTWARE_SKIP_TOOLS の formula は出さない' "$case_dir/output.txt" 'ソフト更新: Homebrew gh '
+assert_not_contains 'RH_SOFTWARE_IGNORE の formula は出さない' "$case_dir/output.txt" 'ソフト更新: Homebrew foo '
+assert_contains 'skip と ignore 後は更新0件' "$case_dir/output.txt" 'ソフト更新あり: 0件'
+
+case_dir="$TEST_TMP/software-auto-cli-skip"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_cli_set "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_SKIP_CLI=0 \
+  RH_MAS="$fake_bin/missing-mas" FAKE_CLAUDE_OUTPUT='1.0.0' FAKE_CLAUDE_LATEST=1.0.0 \
+  FAKE_BREW_JSON='{"formulae":[{"name":"gh","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_not_contains '通常モードでは CLI 点検対象をソフト更新から自動で外す' "$case_dir/output.txt" 'ソフト更新: Homebrew gh '
+
+case_dir="$TEST_TMP/software-security-only"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_SECURITY_ONLY=1 \
+  RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+assert_contains 'security-only の参考見出しにソフト更新を含める' "$case_dir/output.txt" '## ③ 参考（Mac のセキュリティ・ソフト更新）'
+assert_contains 'security-only にソフト更新件数を出す' "$case_dir/output.txt" 'ソフト更新あり: 1件'
+assert_contains 'security-only にソフト更新行を出す' "$case_dir/output.txt" 'ソフト更新: Homebrew rclone'
+
+case_dir="$TEST_TMP/cli-three-day-target"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_cli_set "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+: > "$case_dir/brew.log"
+claude_times='{"2.1.250":"2020-01-01T00:00:00Z","2.1.300":"2020-01-02T00:00:00Z","2.1.310":"2999-01-01T00:00:00Z"}'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 \
+  RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250' FAKE_CLAUDE_LATEST=2.1.310 \
+  FAKE_CLAUDE_TIME_JSON="$claude_times"
+assert_contains 'CLI の上げ先は公開3日以上の版にする' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300（最新 2\.1\.310 は .*公開・3 日待ち）'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

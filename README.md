@@ -79,6 +79,8 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 - **Bun**（1.4.4 より古いもの）。同梱の Brotli と、証明書リスト（eMudhra）の両方が直った版です。
 - **Electron 製のアプリ**（Slack・Discord・1Password・ChatGPT・Obsidian など）。アプリごとの修正版は公表されていないため、Brotli の修正（2026-10-21）より前に更新されたままのアプリを「参考」に並べます。アプリの「更新を確認」で最新にしてください。
 
+0.5.0 では、脆弱性の有無にかかわらず、**入っているソフトが最新かどうか**を見るようにしました。Homebrew で入れたもの、Homebrew を使わずに入れたアプリ、App Store のアプリ、npm で入れた道具（`npm i -g`）が対象です。更新が出ているものは「参考」に並べ、同じ更新が14日以上残ったときだけ WARN にします。あわせて、CLI と npm の道具の上げ先を「公開から3日以上たった版」に変えました。出たばかりの版は、不具合や乗っ取りが見つかって取り下げられることがあるためです。
+
 ### 何を見るか
 
 1. **Homebrew のセキュリティ部品の更新待ち** — 証明書リスト（ca-certificates）、openssl、curl、git、openssh、node、python、php など、セキュリティに関わる部品に更新が出ていないかを見ます。対象の一覧は同梱の `config/security-packages.txt` です。Homebrew を使っていない Mac では、この点検は行いません。
@@ -96,6 +98,13 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 5. **macOS のアップデート待ち** — macOS やセキュリティ関連のアップデートが出ていないかを見ます。
 6. **kit 自身の新しい版** — 公開リポジトリの版番号と比べ、新しい版が出ていれば知らせます。版が新しくなると、点検の中身（テスト先や最低版の表）も新しくなるためです。
 7. **侵害されたパッケージと GitHub Actions**（リポジトリごと） — 同梱の `config/pkg-denylist.tsv` と照らし合わせ、侵害が確認された npm・PyPI のパッケージが lock ファイルに入っていれば FAIL です。版を問わず名前だけで当たるもの（`*`）と、Python の lock（`requirements*.txt`・`poetry.lock`・`uv.lock`・`Pipfile.lock`）にも対応しました。`.github/workflows` で侵害された GitHub Actions（`config/actions-denylist.tsv`）を使っていれば、これも FAIL です。
+8. **入っているソフトの更新待ち**（0.5.0〜） — 次の4つを見て、更新が出ているものを「参考」に並べます。同じ更新が14日以上残ったときは WARN にします。
+   - **Homebrew**: `brew outdated --greedy` で、自分で更新するアプリも含めて見ます。版を固定したもの（`brew pin`）は外します。アプリが自分で更新済みで、Homebrew の記録だけ古いものは数えません。アプリを消したのに Homebrew の記録だけ残っているものは、記録の消し方（`brew uninstall --cask`）を「参考」に添えます。
+   - **Homebrew を使わずに入れたアプリ**: `/Applications` などにあるアプリの版を `Info.plist` から読み、Homebrew の公開目録（cask の一覧）に載っている版と比べます。目録の版は参考値なので、直し方は「アプリの『更新を確認』から」です。アプリは起動しません。Apple 純正のアプリと App Store のアプリは、ここでは比べません。
+   - **App Store のアプリ**: `mas` が入っていれば `mas outdated` で見ます。入っていなければ「未検査」と残します（`brew install mas` で点検に入ります）。
+   - **npm で入れた道具**: `npm outdated -g` で見ます。上げ先は、公開から3日以上たった版のうち、npm の正式版（`latest`）までです。3日たっていない版しかないときは、待つ旨を点検詳細に残します。
+
+   CLI の更新確認も行うとき（`RH_SECURITY_ONLY=0` で `RH_SKIP_CLI=0`）は、Claude Code・Codex・Node.js・npm・gh・Vercel・Supabase・1Password CLI を、同じものを2度出さないよう、ここでは数えません。Homebrew のセキュリティ部品として WARN に出したものも、重ねて出しません。
 
 ### 何を自動で直すか
 
@@ -103,12 +112,14 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 - **それ以外のセキュリティ部品**（node、python、openssl、curl、php など）は、`RH_AUTOFIX_SECURITY=1` のときだけ、まとめて `brew upgrade` します。Node や Python の版が上がると、開発中のアプリの動きが変わることがあるため、初期値は 0（自動更新しない）です。0 のままなら、更新待ちの部品は WARN 1件にまとめて届きます。
 - 最低版の点検（PHP・Node.js・Java・GitLab・macOS・アプリなど）、composer の依存、macOS のアップデートでは、自動では直しません（Homebrew の php と node は、`RH_AUTOFIX_SECURITY=1` のとき上の更新に含まれます）。WARN や FAIL の文に、直し方の手がかりを添えます。
 - 自動更新では、名指しした部品だけを更新します。その部品に依存する別の部品（たとえば Node や Python）を、Homebrew の既定の動きでまとめて更新することはしません。
+- **入っているソフト**は、`RH_AUTOFIX_SOFTWARE=1` のときだけ、Homebrew の formula と、画面のあるアプリを持たない cask（フォントなど）を `brew upgrade` します。初期値は 0（自動更新しない）です。画面のあるアプリ、管理者のパスワードが要る pkg 形式のもの（zoom・Google Drive など）、App Store、npm の道具は、自動では更新しません。更新のあとに Node が起動しなくなったときは、`brew reinstall node` を1回だけ試し、それでも起動しなければ WARN でお知らせします。
 - 自動で更新したものは、レポートの「自動で直したもの」に載ります。自動更新に失敗したときは WARN でお知らせします。
 
 ### 外部へ接続するところ
 
 - **証明書の点検**: 点検のたびに、確認用に公開されているテスト先（`dv-g3b-emudhra.we-have-a-problem.com` など2件。出典は [emudhra.we-have-a-problem.com](https://emudhra.we-have-a-problem.com/)）へ、手元の道具ごとに1回ずつ接続します。初期設定では、多くて10回（道具5つ × テスト先2件）です。応答があったかどうかだけを見て、ページの中身は読みません。止める場合は `RH_TLS_PROBE=0` にします。
 - **新しい版の確認**: `raw.githubusercontent.com` から、版番号だけを書いたファイル `VERSION` を読みます。止める場合は `RH_KIT_UPDATE_CHECK=0` にします。
+- **入っているソフトの更新確認**: Homebrew の公開目録 `https://formulae.brew.sh/api/cask.json` を読みます。目録は手元に保存し、20時間たつまでは読み直しません。読めないときは、7日以内に保存したものを使います。npm の道具は、版ごとの公開日時を npm の公開サーバーから読みます。App Store は `mas` が Apple へ問い合わせます。
 - **そのほか**: Homebrew の更新情報（`brew update`）、macOS のアップデート確認（`softwareupdate -l`）、`composer audit` は、それぞれの配布元へ接続します。
 - 点検結果を送る先は、設定したメールの宛先（Resend 経由）だけです。
 
@@ -128,7 +139,7 @@ Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=
 - `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
 - 「作業中」「同期待ち」は赤黄の対象外です。単発の dirty を異常とは決めつけません。
 - 「未検査」は異常なしを意味しません。npm、Homebrew、ネットワークの状態を確認して再実行してください。
-- 「参考」は、ローカルのレポート（`repo-health-latest.md`）にだけ載り、メールの要対応には数えません。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。
+- 「参考」は、ローカルのレポート（`repo-health-latest.md`）にだけ載り、メールの要対応には数えません。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。入っているソフトの更新も、ここに `ソフト更新: …` の形で並びます。同じ更新が14日以上残ると、WARN に上がります。
 
 Mac のセキュリティ点検の文面は、たとえば次のようになります。版やパスは Mac ごとに変わります。
 
@@ -159,7 +170,7 @@ RH_AUTOFIX_PULL=1
 RH_AUTOFIX_CLI=0
 ```
 
-CLI の自動更新は初期状態で無効です。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
+CLI の自動更新は初期状態で無効です。有効にしたときも、npm で入れた CLI は公開から3日以上たった版までしか上げません（0.5.0〜）。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
 
 点検ルート直下にある git 管理外のフォルダは、点検できないので WARN で知らせます（`RH_WARN_NONGIT=1`、初期値）。空のフォルダと `.` で始まるフォルダは参考扱いです。
 素材置き場など git 管理外でよいフォルダは `RH_NONGIT_IGNORE` に名前を書くと、WARN ではなく参考に出ます。
@@ -175,6 +186,17 @@ RH_TLS_PROBE=1            # 0 で証明書の点検（テスト先への接続�
 RH_SKIP_SOFTWAREUPDATE=0  # 1 で macOS のアップデート確認を止めます
 RH_KIT_UPDATE_CHECK=1     # 0 で kit の新しい版の確認を止めます
 ```
+
+入っているソフトの更新確認（0.5.0〜）の設定は次の4つです。値は初期値です。
+
+```bash
+RH_SKIP_SOFTWARE=0        # 1 で入っているソフトの更新確認を止めます
+RH_AUTOFIX_SOFTWARE=0     # 1 で Homebrew の formula と、画面のあるアプリを持たない cask を自動更新します
+RH_SOFTWARE_STALE_DAYS=14 # 同じ更新がこの日数以上残ったら WARN にします
+RH_SOFTWARE_IGNORE=()     # 更新確認から外すもの。例: ("rclone" "Microsoft Word" "some-npm-package")
+```
+
+`RH_SOFTWARE_IGNORE` には、Homebrew の formula 名・cask 名、npm のパッケージ名、アプリ名（`.app` を除いた名前）を書きます。仕事で版を固定しているものや、止めている道具を書いておくと、参考にも WARN にも出なくなります。
 
 `RH_SECURITY_ONLY=1` は、リポジトリの同期や依存の監査を別の仕組みで見ている場合に使います。このとき、リポジトリの fetch・未コミット・同期待ち・npm/composer audit・CLI の更新確認は行いません。レポートの見出しは「Mac のセキュリティ点検」、メールの件名は `[mac-security]` になります。
 
