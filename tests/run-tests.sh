@@ -1122,7 +1122,7 @@ case_dir="$TEST_TMP/apps-old"
 fake_bin="$case_dir/fake-bin"
 apps="$case_dir/apps"
 make_fake_brew "$fake_bin"
-make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.46
+make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.78
 make_fake_app "$apps/入れ子" 'Claude' com.anthropic.claudefordesktop 1.15961.9
 make_fake_app "$apps" 'Firefox' org.mozilla.firefox 140.4.0
 mkdir -p "$apps/Firefox.app/Contents/Resources/defaults/pref"
@@ -1130,7 +1130,7 @@ printf '%s\n' 'pref("app.update.channel", "esr");' > "$apps/Firefox.app/Contents
 make_fake_app "$apps" 'Other' com.example.other 0.0.1
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
-assert_contains 'Chrome 156.0.8078.46 は修正版 156.0.8078.47 より古い WARN' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.46（.*Google Chrome\.app）は修正版 156\.0\.8078\.47 より古い版です'
+assert_contains 'Chrome 156.0.8078.78 は修正版 156.0.8078.79 より古い WARN' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.78（.*Google Chrome\.app）は修正版 156\.0\.8078\.79 より古い版です'
 assert_contains 'Chrome の WARN に直し方を含める' "$case_dir/output.txt" 'Chrome を再起動すると更新されます（設定 → Chrome について）'
 assert_contains '1 段下のフォルダにある Claude Desktop 1.15961.9 も WARN' "$case_dir/output.txt" 'WARN  Claude Desktop 1\.15961\.9（.*入れ子/Claude\.app）は修正版 1\.15962\.0 より古い版です'
 assert_contains 'Firefox ESR は比べず NOTES にする' "$case_dir/output.txt" 'Firefox ESR（.*Firefox\.app）— ESR の系列は未検査'
@@ -1141,13 +1141,13 @@ case_dir="$TEST_TMP/apps-fixed"
 fake_bin="$case_dir/fake-bin"
 apps="$case_dir/apps"
 make_fake_brew "$fake_bin"
-make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.47
+make_fake_app "$apps" 'Google Chrome' com.google.Chrome 156.0.8078.79
 make_fake_app "$apps" 'Claude' com.anthropic.claudefordesktop 1.15962.0
 make_fake_app "$apps" 'Firefox' org.mozilla.firefox 158.0.1
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
 assert_not_contains '修正版ちょうどのアプリは要対応に出さない' "$case_dir/output.txt" '(WARN|FAIL)  (Chrome|Claude Desktop|Firefox) '
-assert_contains '修正版以上のアプリは detail に残す' "$case_dir/output.txt" 'com\.google\.Chrome 156\.0\.8078\.47（.*）— 最低版 156\.0\.8078\.47 以上'
+assert_contains '修正版以上のアプリは detail に残す' "$case_dir/output.txt" 'com\.google\.Chrome 156\.0\.8078\.79（.*）— 最低版 156\.0\.8078\.79 以上'
 
 case_dir="$TEST_TMP/apps-firefox-old"
 fake_bin="$case_dir/fake-bin"
