@@ -213,7 +213,7 @@ repo名<TAB>advisoryまたはpackage<TAB>YYYY-MM-DD<TAB>理由
 
 ## 新しい版に更新する
 
-clone したフォルダで、次を実行します（PROMPT.md で入れた場合は `~/Tools/repo-health-kit` です）。
+clone したフォルダで、次を実行します（PROMPT.md で入れた場合は `~/Tools/repo-health-kit`、AIFCC Workshop の受講者は `~/projects/repo-health-kit` です）。
 
 ```bash
 git pull

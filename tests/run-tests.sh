@@ -962,7 +962,8 @@ chmod +x "$fake_bin/curl"
 : > "$case_dir/brew.log"
 : > "$case_dir/curl.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_CURL_LOG="$case_dir/curl.log" RH_KIT_UPDATE_CHECK=1
-assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" 'WARN  repo-health-kit の新しい版 0\.5\.0 → 0\.9\.0 があります'
+kit_version_re="$(sed -n '1p' "$PROJECT_DIR/VERSION" | sed 's/\./\\./g')"
+assert_contains 'kit の新しい版は WARN' "$case_dir/output.txt" "WARN  repo-health-kit の新しい版 ${kit_version_re} → 0\.9\.0 があります"
 
 case_dir="$TEST_TMP/composer"
 mkdir -p "$case_dir"

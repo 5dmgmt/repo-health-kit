@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- clone 先の例に `~/projects/` を併記しました（AIFCC Workshop 向け）。
+
 ## 0.5.1 - 2026-10-31
 
 - Chrome の最低版を 156.0.8078.79 に上げました（2026-10-27 と 2026-10-29 の安全修正）。

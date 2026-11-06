@@ -10,7 +10,7 @@ repo-health-kit は、Mac にある git リポジトリと、Mac のセキュリ
 公開リポジトリ: https://github.com/5dmgmt/repo-health-kit
 
 進め方:
-1. リポジトリを ~/Tools/repo-health-kit に clone し、README.md を最後まで読んでから始めてください。
+1. リポジトリを ~/Tools/repo-health-kit（AIFCC Workshop の受講者は ~/projects/repo-health-kit）に clone し、既に clone してあればそのフォルダで、README.md を最後まで読んでから始めてください。
 2. 前提のコマンド（bash・git・python3・curl・perl。あれば node・npm・Homebrew・composer）がそろっているか確かめてください。足りないものを入れる前に、何をどう入れるかを私に確認してください。
 3. 私の git リポジトリがどのフォルダにあるかを私に聞いてください。./install.sh は最後に初回の点検を行い、そのとき Homebrew の証明書リスト（ca-certificates）に更新が出ていれば自動で更新します。実行する前にそのことを私に説明し、了解を取ってから ./install.sh を実行してください。そのあと ~/.config/repo-health-kit/config.sh の RH_ROOTS を、そのフォルダにしてください。
 4. メールは Resend で送ります。Resend のアカウント作成と API キーの作成は私が行います。キーの保存は、README にある security add-generic-password のコマンドを私が自分のターミナルで実行し、キーも私が自分で貼り付けます。あなたは API キーを聞かない・表示しない・ファイルや設定に書かないでください。
@@ -44,7 +44,7 @@ repo-health-kit は、Mac にある git リポジトリと、Mac のセキュリ
 公開リポジトリ: https://github.com/5dmgmt/repo-health-kit
 
 進め方:
-1. repo-health-kit を clone したフォルダ（たとえば ~/Tools/repo-health-kit）で git status を確かめ、私の変更が残っていなければ git pull してください。変更が残っていたら、pull する前に私に相談してください。そのあと README.md と CHANGELOG.md を読み、今回の版で増えたことを短く説明してください。
+1. repo-health-kit を clone したフォルダ（たとえば ~/Tools/repo-health-kit や ~/projects/repo-health-kit）で git status を確かめ、私の変更が残っていなければ git pull してください。変更が残っていたら、pull する前に私に相談してください。そのあと README.md と CHANGELOG.md を読み、今回の版で増えたことを短く説明してください。
 2. ./install.sh の最後の点検で、Homebrew の証明書リスト（ca-certificates）が自動で更新されることがあります。そのことを私に説明してから ./install.sh を実行してください。設定ファイルは上書きされず、新しい設定は書かなくても初期値で動きます。
 3. RH_NOMAIL=1 を付けて一度点検を実行し、~/Library/Logs/repo-health-kit/repo-health-latest.md の「要対応」と「Mac のセキュリティ」の結果を、専門用語を使わずに説明してください。
 4. Node や Python なども自動で更新するか（RH_AUTOFIX_SECURITY）を私に聞いてください。有効にすると開発中のアプリの動きが変わることがある点を、先に説明してください。
