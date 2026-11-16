@@ -554,8 +554,13 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
         self.assert_hit(self.scan(), 'FAIL', 'captcha_bypass')
 
     def test_map_limiter(self):
-        self.write('app/api/form/route.ts', 'const rateLimit = new Map();\nexport function POST() {}')
+        self.write('app/api/form/route.ts', 'const rateLimit = new Map();\nexport function POST() { const now = Date.now(); const v = rateLimit.get(1); if (!v || v.reset < now) rateLimit.set(1, { count: 1, reset: now + 60000 }); }')
         self.assert_hit(self.scan(), 'WARN', 'memory_rate_limit')
+
+    def test_lookup_map_is_not_limiter(self):
+        # 問題の一覧などの引き表は、連射制限として数えない
+        self.write('app/api/exam/route.ts', 'const QUESTION_BY_ID = new Map(QUESTIONS.map((q) => [q.id, q]));\nexport function POST() { return QUESTION_BY_ID.get(1); }')
+        self.assert_no_hit(self.scan(), 'memory_rate_limit')
 
     def test_new_unauth_route(self):
         self.write('app/api/form/route.ts', 'export function POST() {}')

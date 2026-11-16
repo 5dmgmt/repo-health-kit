@@ -894,7 +894,9 @@ def route_scan(repo: Repo, guard: Guard, texts):
                 guard.finding('FAIL', 'cron_auth', repo, f'{repo.label}:{rel}', 'cron の秘密の確認がないか、未設定時に素通りする形です')
         if re.search(r'if\s*\(\s*!\s*\w*[sS]ecret\w*\s*\)\s*\{?\s*return\s+true\b', text):
             guard.finding('FAIL', 'captcha_bypass', repo, f'{repo.label}:{rel}', 'captcha の秘密が未設定のときに許可する形です')
-        if re.search(r'^(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*new\s+Map\s*[(<]', text, re.M) and re.search(r'rate|limit|throttl|attempt', text, re.I):
+        # 連射制限の Map は「名前が limit・rate・attempt・hits などで、時刻か回数を入れる」形だけを数える（問題の一覧などの引き表は数えない）
+        limiter_maps = re.findall(r'^(?:export\s+)?(?:const|let|var)\s+(\w*(?:limit|rate|attempt|hit|throttl|bucket|request|ip)\w*)\s*=\s*new\s+Map\s*[(<]', text, re.M | re.I)
+        if limiter_maps and re.search(r'Date\.now\s*\(|reset|window|count|attempts', text, re.I):
             guard.finding('WARN', 'memory_rate_limit', repo, f'{repo.label}:{rel}', 'モジュール直下の Map による連射制限はサーバーレスで共有されません')
         if not auth:
             unauth.append(rel)
