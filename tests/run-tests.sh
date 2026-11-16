@@ -2399,14 +2399,21 @@ for name in (".env.local", ".env.production"):
     (repo / name).write_text("SUPABASE_SERVICE_ROLE_KEY=" + jwt("service_role") + "\n")
 (repo / "anon.ts").write_text("const publicToken = '" + jwt("anon") + "';\n")
 (repo / ".env.example").write_text("EMPTY=\nREF=op://fixture/item/field\nSAMPLE=<value>\nKEY=your-key\n")
-(repo / ".env.sample").write_text("KEY=" + "sb_secret_" + "x" * 30 + "\n")
+(repo / ".env.sample").write_text("KEY=" + "sb_secret_" + "Fk3jQ9zLm2Pq8RtW5vXy7BnC" + "\n")
 (repo / "types.ts").write_text("\n".join([
-    "sb_secret_" + "x" * 30,
-    "re_" + "x" * 24,
-    "AKIA" + "X" * 16,
-    "github_pat_" + "x" * 30,
-    "GOCSPX-" + "x" * 30,
-    "postgresql://fixture:fixture@localhost/db",
+    "sb_secret_" + "Fk3jQ9zLm2Pq8RtW5vXy7BnC",
+    "re_" + "Ab3dE6gH" + "_" + "Jk9mN2pQ5sT8vW1yZ4bC7eF0",
+    "AKIA" + "Q3ZK7RWM2XPL9TBV",
+    "github_pat_" + "11AbCdEfGh2IjKlMnOp3Qr" + "_" + "St4UvWxYz5AbCdEfGh6IjKlMnOp7QrStUvWx8YzAbCdEf9GhIjKlMnOpQ0rStUv",
+    "GOCSPX-" + "Fk3jQ9zLm2Pq8RtW5vXy7Bn",
+    "postgresql://fixture:" + "Zq8vK2mN7pR4tW" + "@db.fixture.invalid/db",
+]))
+(repo / "samples.md").write_text("\n".join([
+    "store_credentials_for_everyone_in_the_list = 1",
+    "RESEND_API_KEY=re_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxx",
+    "postgresql://postgres:[YOUR-PASSWORD]@db.abcdefghijklmnopqrst.supabase.co:5432/postgres",
+    "postgres://user:password@localhost:5432/app",
+    "github_pat_ で始まるトークンは細かい権限のトークンです",
 ]))
 PY
 commit_all
@@ -2417,6 +2424,7 @@ assert_contains '見本ファイルでも実値の秘密は FAIL' "$case_dir/out
 assert_not_contains '空・1Password・見本値だけのテンプレートは除外する' "$case_dir/output.txt" 'FAIL .*\.env\.example'
 assert_not_contains 'anon JWT は秘密の検出対象にしない' "$case_dir/output.txt" 'FAIL .*anon\.ts'
 assert_contains '追加した秘密の型をソースでも検出する' "$case_dir/output.txt" 'FAIL .*types\.ts:[0-9]+'
+assert_not_contains '単語の途中・見本の値・localhost の接続 URL は鍵として数えない' "$case_dir/output.txt" 'FAIL .*samples\.md'
 if python3 - "$case_dir/output.txt" "$REPO_PATH" <<'PY'
 import re
 import sys

@@ -334,15 +334,28 @@ patterns = [
     ("Anthropic API key", r"sk-ant-[A-Za-z0-9_-]{40,}"),
     ("OpenAI API key", r"sk-proj-[A-Za-z0-9_-]{40,}"),
     ("Stripe key", r"sk_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{25,}"),
-    ("GitHub token", r"gh[pous]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]+"),
-    ("Supabase token", r"sbp_[a-f0-9]{40}|sb_secret_[A-Za-z0-9_-]+"),
+    ("GitHub token", r"gh[pous]_[A-Za-z0-9]{30,}|(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9]{20,}_[A-Za-z0-9]{40,}"),
+    ("Supabase token", r"sbp_[a-f0-9]{40}|(?<![A-Za-z0-9_])sb_secret_[A-Za-z0-9_-]{20,}"),
     ("Slack token", r"xox[baprs]-[A-Za-z0-9-]{20,}"),
     ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    ("Resend API key", r"re_[A-Za-z0-9_]{20,}"),
-    ("AWS access key", r"AKIA[0-9A-Z]{16}"),
-    ("Google OAuth secret", r"GOCSPX-[A-Za-z0-9_-]+"),
-    ("PostgreSQL password URL", r"postgres(?:ql)?://[^\s:/]+:[^\s@]+@[^\s]+"),
+    ("Resend API key", r"(?<![A-Za-z0-9_])re_[A-Za-z0-9]{6,12}_[A-Za-z0-9]{16,40}(?![A-Za-z0-9_])"),
+    ("AWS access key", r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])"),
+    ("Google OAuth secret", r"(?<![A-Za-z0-9_])GOCSPX-[A-Za-z0-9_-]{20,}"),
+    ("PostgreSQL password URL", r"postgres(?:ql)?://[^\s:/@]+:[^\s@]+@[^\s]+"),
 ]
+pg_url = re.compile(r"postgres(?:ql)?://[^\s:/@]+:([^\s@]+)@([^\s/:?]+)")
+placeholder = re.compile(r"(?i)^(\[.*\]|<.*>|\$\{?[A-Za-z_]+\}?|\*+|x+|\.+|password|pass|passwd|postgres|secret|changeme|your[-_].*|.*example.*|.*placeholder.*|.*dummy.*|.*fake.*)$")
+sample_token = re.compile(r"(?i)x{6,}|your|example|dummy|fake|sample|placeholder")
+
+def real_hit(label, pattern, text):
+    # 見本の値と、見本のパスワード・localhost の接続 URL は数えません。
+    if label == "PostgreSQL password URL":
+        for m in pg_url.finditer(text):
+            pw, host = m.group(1), m.group(2).lower()
+            if len(pw) >= 8 and not placeholder.match(pw) and host not in ("localhost", "127.0.0.1", "host", "hostname", "db", "postgres") and "example" not in host:
+                return True
+        return False
+    return any(not sample_token.search(m.group(0)) for m in re.finditer(pattern, text))
 assignment = re.compile(r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.*?)\s*$")
 jwt = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
@@ -390,7 +403,7 @@ for kind, source in (("tracked", sys.argv[2]), ("untracked", sys.argv[3])):
             if template_safe and assignment.match(text):
                 continue
             for label, pattern in patterns:
-                if re.search(pattern, text):
+                if real_hit(label, pattern, text):
                     hits.add((n, label))
             if any(role(m.group()) == 'service_role' for m in jwt.finditer(text)):
                 hits.add((n, 'Supabase service_role JWT'))
