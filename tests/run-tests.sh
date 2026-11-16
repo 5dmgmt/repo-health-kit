@@ -3325,6 +3325,11 @@ for dg_mode in missing nonzero timeout; do
     RH_DATA_GUARD_TIMEOUT=1 K2_MODE="$dg_mode"
   assert_contains "$dg_mode: データ点検の途中終了を未検査の WARN にする" "$case_dir/output.txt" 'WARN .*データの守りの点検が最後まで動きませんでした（未検査）'
 done
+: > "$case_dir/calls"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1 \
+  RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls" RH_DATA_GUARD=0
+assert_count 'RH_DATA_GUARD=0 ならデータの守りを呼ばない' "$case_dir/calls" '^call$' 0
+assert_contains 'RH_DATA_GUARD=0 は未検査として注記する' "$case_dir/output.txt" 'データの守りの点検は RH_DATA_GUARD=0 のため未検査'
 cp "$TEST_TMP/k1-mail/fake-bin/security" "$TEST_TMP/k1-mail/fake-bin/curl" "$fake_bin/"
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 \
   RH_MAIL_TO=fixture@example.invalid FAKE_MAIL_PAYLOAD="$case_dir/mail.json" \

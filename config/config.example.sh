@@ -91,6 +91,8 @@ RH_KIT_UPDATE_CHECK=1
 RH_NO_DESKTOP=0
 
 # データの守り。静的点検は毎回動きます。GitHub への通信だけを止める場合は 0 です。
+# データの守りの点検（0 で止める。同じリポを持つ Mac が複数あるときは 1 台だけで動かすと重複しません）
+RH_DATA_GUARD=1
 RH_DATA_GITHUB=1
 RH_DATA_GUARD_TIMEOUT=300
 # RH_DATA_ALLOW="$HOME/.config/repo-health-kit/data-allow.tsv"
