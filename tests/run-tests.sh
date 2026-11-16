@@ -152,6 +152,7 @@ PY
     fi
     exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;
   list)
+    [ -z "${FAKE_BREW_LIST_LOG-}" ] || printf '%s\n' "$*" >> "$FAKE_BREW_LIST_LOG"
     [ "${FAKE_BREW_LIST_RC:-0}" = 0 ] || exit "$FAKE_BREW_LIST_RC"
     if [ "${2:-}" = --pinned ]; then
       printf '%b' "${FAKE_BREW_PINNED-}"
@@ -238,6 +239,27 @@ SH
   chmod +x "$bin/node"
 }
 
+make_npm_metadata_wrapper() {
+  local dir="$1"
+  mv "$dir/npm" "$dir/npm-fixture"
+  cat > "$dir/npm" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = view ]; then
+  package="${2%@*}"
+  "$0-fixture" view "$package" time --json | python3 -c '
+import json, sys
+raw = json.load(sys.stdin)
+if "time" in raw or isinstance(raw, list):
+    print(json.dumps(raw)); raise SystemExit()
+versions = sorted(raw, key=lambda v: tuple(map(int, v.split("."))))
+print(json.dumps({"time":raw, "versions":versions, "dist-tags":{"latest":versions[-1]}}))'
+else
+  exec "$0-fixture" "$@"
+fi
+SH
+  chmod +x "$dir/npm"
+}
+
 make_fake_software_npm() {
   local fake_bin="$1"
   mkdir -p "$fake_bin"
@@ -252,6 +274,7 @@ make_fake_software_npm() {
     printf '%s\n' 'exit 1'
   } > "$fake_bin/npm"
   chmod +x "$fake_bin/npm"
+  make_npm_metadata_wrapper "$fake_bin"
 }
 
 make_fake_mas() {
@@ -376,8 +399,8 @@ mkdir -p "$case_dir/root with space/素材フォルダ" "$case_dir/root with spa
 printf 'memo\n' > "$case_dir/root with space/素材フォルダ/memo.txt"
 printf 'x\n' > "$case_dir/root with space/.hidden/x"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'git 管理外のフォルダは WARN' "$case_dir/output.txt" 'WARN  素材フォルダ — git 管理外のフォルダです'
-assert_contains '空のフォルダは参考' "$case_dir/output.txt" 'empty-dir — 空のフォルダ'
+assert_contains 'git 管理外のフォルダは WARN' "$case_dir/output.txt" 'WARN  「素材フォルダ」 — git 管理外のフォルダです'
+assert_contains '空のフォルダは参考' "$case_dir/output.txt" '「empty-dir」 — 空のフォルダ'
 assert_not_contains '隠しフォルダは対象外' "$case_dir/output.txt" '\.hidden'
 RH_WARN_NONGIT=0 run_health "$case_dir" "$case_dir/root with space"
 assert_not_contains 'RH_WARN_NONGIT=0 なら知らせない' "$case_dir/output.txt" 'git 管理外のフォルダ'
@@ -387,7 +410,7 @@ mkdir -p "$case_dir"
 make_remote_repo "$case_dir" detached
 git -C "$REPO_PATH" checkout -q --detach
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'detached HEAD は FAIL' "$case_dir/output.txt" 'FAIL  detached .* detached HEAD'
+assert_contains 'detached HEAD は FAIL' "$case_dir/output.txt" 'FAIL  「detached」 .* detached HEAD'
 
 case_dir="$TEST_TMP/env"
 mkdir -p "$case_dir"
@@ -399,7 +422,7 @@ git -C "$REPO_PATH" push -q
 printf 'API_KEY=plain-text\n' > "$REPO_PATH/.env"
 printf 'API_KEY=ignored-local\n' > "$REPO_PATH/.env.local"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains '未追跡かつ gitignore 外の .env は FAIL' "$case_dir/output.txt" 'FAIL  envrepo .*未追跡かつ gitignore 外: .env'
+assert_contains '未追跡かつ gitignore 外の .env は FAIL' "$case_dir/output.txt" 'FAIL  「envrepo」 .*未追跡かつ gitignore 外: 「.env」'
 assert_not_contains '.env.local は検出対象外' "$case_dir/output.txt" '\.env\.local'
 
 case_dir="$TEST_TMP/stash"
@@ -408,7 +431,7 @@ make_remote_repo "$case_dir" stashrepo
 printf 'change\n' >> "$REPO_PATH/README.md"
 git -C "$REPO_PATH" stash push -q
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'stash 残置は WARN' "$case_dir/output.txt" 'WARN  stashrepo .*stash 1 件残置'
+assert_contains 'stash 残置は WARN' "$case_dir/output.txt" 'WARN  「stashrepo」 .*stash 1 件残置'
 
 case_dir="$TEST_TMP/no-origin"
 root="$case_dir/root"
@@ -421,7 +444,7 @@ printf 'fixture\n' > "$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -q -m 'test: initial'
 run_health "$case_dir" "$root"
-assert_contains 'origin 未設定は WARN' "$case_dir/output.txt" 'WARN  no-origin .*origin 未設定'
+assert_contains 'origin 未設定は WARN' "$case_dir/output.txt" 'WARN  「no-origin」 .*origin 未設定'
 
 case_dir="$TEST_TMP/gitlab-origin"
 mkdir -p "$case_dir"
@@ -450,12 +473,12 @@ make_remote_repo "$case_dir" dirtyrepo
 printf 'working\n' >> "$REPO_PATH/README.md"
 run_health "$case_dir" "$case_dir/root with space"
 assert_contains 'dirty 1日目は作業中' "$case_dir/output.txt" 'dirty 1件（1日目・作業中）'
-assert_not_contains 'dirty 1日目は WARN にしない' "$case_dir/output.txt" 'WARN  dirtyrepo .*dirty'
+assert_not_contains 'dirty 1日目は WARN にしない' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty'
 state_file="$(find "$case_dir/state" -name 'dirty-*.state' -print -quit)"
 yesterday="$(date -v-1d '+%Y-%m-%d' 2>/dev/null || date -d 'yesterday' '+%Y-%m-%d')"
 printf '%s 2\n' "$yesterday" > "$state_file"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'dirty 3日目は WARN' "$case_dir/output.txt" 'WARN  dirtyrepo .*dirty 1件が3日連続'
+assert_contains 'dirty 3日目は WARN' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty 1件が3日連続'
 
 case_dir="$TEST_TMP/denylist"
 mkdir -p "$case_dir"
@@ -466,7 +489,7 @@ git -C "$REPO_PATH" add package.json package-lock.json
 git -C "$REPO_PATH" commit -q -m 'test: add lockfile'
 git -C "$REPO_PATH" push -q
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'denylist 完全一致は FAIL' "$case_dir/output.txt" 'FAIL  denyrepo .*keyv@6.0.0'
+assert_contains 'denylist 完全一致は FAIL' "$case_dir/output.txt" 'FAIL  「denyrepo」 .*keyv@6.0.0'
 
 case_dir="$TEST_TMP/unsafe-config"
 mkdir -p "$case_dir/home/.config/repo-health-kit" "$case_dir/root"
@@ -486,7 +509,7 @@ case_dir="$TEST_TMP/install"
 mkdir -p "$case_dir/home"
 HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_NO_DESKTOP=1 \
   RH_SKIP_SECURITY=1 \
-  bash "$PROJECT_DIR/install.sh" > "$case_dir/install-output.txt" 2>&1
+  /bin/bash "$PROJECT_DIR/install.sh" > "$case_dir/install-output.txt" 2>&1
 install_rc=$?
 installed_assets=0
 if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/VERSION" ] \
@@ -497,7 +520,7 @@ if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/VERSION" ] \
   && [ -f "$case_dir/home/Library/Application Support/repo-health-kit/config/actions-denylist.tsv" ]; then
   installed_assets=1
 fi
-HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
+HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 /bin/bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
 uninstall_rc=$?
 if [ "$install_rc" -eq 0 ] && [ "$uninstall_rc" -eq 0 ] \
   && [ ! -e "$case_dir/home/Library/LaunchAgents/com.repo-health-kit.plist" ] \
@@ -986,7 +1009,7 @@ make_python_site "$site" 26.2.1 2026.7.22
 chmod +x "$venv/bin/python"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
-assert_count '同じ venv の古い pip と certifi は WARN 1件にまとめる' "$case_dir/output.txt" 'WARN  Python（fixture/\.venv）' 1
+assert_count '同じ venv の古い pip と certifi は WARN 1件にまとめる' "$case_dir/output.txt" 'WARN  Python（「fixture」/「.venv」）' 1
 assert_contains 'venv の WARN はその venv の python を案内する' "$case_dir/output.txt" "$venv/bin/python"
 assert_contains 'venv の WARN は sha256 付き pip URL を案内する' "$case_dir/output.txt" 'pip-26\.2\.2-py3-none-any\.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70'
 assert_contains 'venv の WARN は sha256 付き certifi URL を案内する' "$case_dir/output.txt" 'certifi-2026\.10\.19-py3-none-any\.whl#sha256=42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b'
@@ -1004,8 +1027,8 @@ make_python_site "$site" 26.2.2 2026.10.19
 make_exit_command "$venv/bin/python" 0
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
-assert_not_contains '修正版の venv は Python の WARN を出さない' "$case_dir/output.txt" '^WARN  Python（fixture/\.venv）'
-assert_contains '修正版の pip は最低版以上の detail を出す' "$case_dir/output.txt" 'Python（fixture/\.venv）の pip 26\.2\.2 — 最低版 26\.2\.2 以上'
+assert_not_contains '修正版の venv は Python の WARN を出さない' "$case_dir/output.txt" '^WARN  Python（「fixture」/「.venv」）'
+assert_contains '修正版の pip は最低版以上の detail を出す' "$case_dir/output.txt" 'Python（「fixture」/「.venv」）の pip 26\.2\.2 — 最低版 26\.2\.2 以上'
 
 case_dir="$TEST_TMP/python-dist-info-remnant"
 fake_bin="$case_dir/fake-bin"
@@ -1288,9 +1311,9 @@ chmod +x "$composer_fake"
 FAKE_COMPOSER_ARGS="$case_dir/args.log" run_composer "$case_dir/high" "$case_dir/root with space" "$composer_fake"
 assert_contains 'composer のプラグインを読み込まない' "$case_dir/args.log" '--no-plugins'
 assert_contains 'composer のスクリプトを動かさない' "$case_dir/args.log" '--no-scripts'
-assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  composerrepo — 本番依存に critical/high 脆弱性（composer'
+assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  「composerrepo」 — 本番依存に critical/high 脆弱性（composer'
 run_composer "$case_dir/absent" "$case_dir/root with space" ''
-assert_contains 'composer 不在は WARN' "$case_dir/absent/output.txt" 'WARN  composerrepo — composer audit 実行不能（composer 不在）'
+assert_contains 'composer 不在は WARN' "$case_dir/absent/output.txt" 'WARN  「composerrepo」 — composer audit 実行不能（composer 不在）'
 
 # ---- 0.4.0 後半: macOS・Claude Code・アプリ・Homebrew の formula ----
 
@@ -1314,7 +1337,7 @@ run_macos_case macos-26-old 26.7.0
 assert_contains 'macOS 26.7.0 は修正版 26.7.1 より古い WARN' "$TEST_TMP/macos-26-old/output.txt" 'WARN  macOS 26\.7\.0 は修正版 26\.7\.1 より古い版です'
 
 run_macos_case macos-14-eol 14.7
-assert_contains 'macOS 14.7 は修正版が出ていない系列の WARN' "$TEST_TMP/macos-14-eol/output.txt" 'WARN  macOS 14\.7 はサポート終了の系列です.*この系列には修正版が出ていません。新しい macOS へ更新してください'
+assert_contains 'macOS 14.7 は修正版が出ていない系列の WARN' "$TEST_TMP/macos-14-eol/output.txt" 'WARN  macOS 14\.7 — 古い系列（表の最低系列 15 より前）'
 
 run_macos_case macos-27 27.0.1
 assert_not_contains 'macOS 27.0.1 は表に無い系列で要対応に出さない' "$TEST_TMP/macos-27/output.txt" '(WARN|FAIL)  macOS '
@@ -1339,7 +1362,7 @@ make_fake_brew "$fake_bin"
 make_fake_claude "$fake_bin/claude"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.259 (Claude Code)'
-assert_contains 'Claude Code 2.1.259 は修正版 2.1.260 より古い WARN' "$case_dir/output.txt" 'WARN  Claude Code 2\.1\.259（.*fake-bin/claude）は修正版 2\.1\.260 より古い版です（GHSA-gfvf-j8jh-jxxw'
+assert_contains 'Claude Code 2.1.259 は修正版 2.1.260 より古い WARN' "$case_dir/output.txt" 'WARN  Claude Code 2\.1\.259（.*fake-bin/claude」）は修正版 2\.1\.260 より古い版です（GHSA-gfvf-j8jh-jxxw'
 assert_contains 'Claude Code の WARN に claude update の案内を含める' "$case_dir/output.txt" 'claude update で更新してください'
 
 case_dir="$TEST_TMP/claude-fixed"
@@ -1356,7 +1379,7 @@ make_fake_brew "$fake_bin"
 make_fake_claude "$fake_bin/claude"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT=''
-assert_contains '版を返さない Claude Code は未検査の NOTES' "$case_dir/output.txt" 'Claude Code（.*fake-bin/claude）— 版を判定できず未検査'
+assert_contains '版を返さない Claude Code は未検査の NOTES' "$case_dir/output.txt" 'Claude Code（.*fake-bin/claude」）— 版を判定できず未検査'
 
 case_dir="$TEST_TMP/claude-symlink"
 fake_bin="$case_dir/fake-bin"
@@ -1392,6 +1415,7 @@ make_fake_cli_set() {
     printf '%s\n' 'exit 0'
   } > "$dir/curl"
   chmod +x "$dir/npm" "$dir/curl"
+  make_npm_metadata_wrapper "$dir"
 }
 
 case_dir="$TEST_TMP/claude-cli-dup"
@@ -1402,7 +1426,7 @@ make_fake_claude "$fake_bin/claude"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 \
   RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)' FAKE_CLAUDE_LATEST=3.0.0
-assert_contains 'CLI の更新確認はメジャー版遅れを WARN にする' "$case_dir/output.txt" 'WARN  claude — メジャー版が遅れています 2\.1\.250 → 3\.0\.0'
+assert_contains 'CLI の更新確認はメジャー版遅れを WARN にする' "$case_dir/output.txt" 'WARN  claude 2\.1\.250 → 3\.0\.0'
 assert_not_contains '同じ claude の最低版の話は 2 度目の WARN にしない' "$case_dir/output.txt" 'WARN  Claude Code 2\.1\.250'
 assert_contains '2 度目に出さなかった最低版の話は detail に残す' "$case_dir/output.txt" 'Claude Code 2\.1\.250（.*）は修正版 2\.1\.260 より古い版です.*WARN は 1 件にまとめています'
 
@@ -1442,10 +1466,10 @@ printf '%s\n' 'pref("app.update.channel", "esr");' > "$apps/Firefox.app/Contents
 make_fake_app "$apps" 'Other' com.example.other 0.0.1
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
-assert_contains 'Chrome 156.0.8078.78 は修正版 156.0.8078.79 より古い WARN' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.78（.*Google Chrome\.app）は修正版 156\.0\.8078\.79 より古い版です'
+assert_contains 'Chrome 156.0.8078.78 は修正版 156.0.8078.79 より古い WARN' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.78（.*Google Chrome\.app」）は修正版 156\.0\.8078\.79 より古い版です'
 assert_contains 'Chrome の WARN に直し方を含める' "$case_dir/output.txt" 'Chrome を再起動すると更新されます（設定 → Chrome について）'
-assert_contains '1 段下のフォルダにある Claude Desktop 1.15961.9 も WARN' "$case_dir/output.txt" 'WARN  Claude Desktop 1\.15961\.9（.*入れ子/Claude\.app）は修正版 1\.15962\.0 より古い版です'
-assert_contains 'Firefox ESR は比べず NOTES にする' "$case_dir/output.txt" 'Firefox ESR（.*Firefox\.app）— ESR の系列は未検査'
+assert_contains '1 段下のフォルダにある Claude Desktop 1.15961.9 も WARN' "$case_dir/output.txt" 'WARN  Claude Desktop 1\.15961\.9（.*入れ子/Claude\.app」）は修正版 1\.15962\.0 より古い版です'
+assert_contains 'Firefox ESR は比べず NOTES にする' "$case_dir/output.txt" 'Firefox ESR（.*Firefox\.app」）— ESR の系列は未検査'
 assert_not_contains 'Firefox ESR は WARN にしない' "$case_dir/output.txt" '(WARN|FAIL)  Firefox '
 assert_not_contains '表に無いアプリは何も出さない' "$case_dir/output.txt" 'com\.example\.other|Other\.app'
 
@@ -1470,7 +1494,7 @@ mkdir -p "$apps/Firefox.app/Contents/Resources/defaults/pref"
 printf '%s\n' 'pref("app.update.channel", "release");' > "$apps/Firefox.app/Contents/Resources/defaults/pref/channel-prefs.js"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps"
-assert_contains '通常版の Firefox 158.0 は 158.0.1 より古い WARN' "$case_dir/output.txt" 'WARN  Firefox 158\.0（.*Firefox\.app）は修正版 158\.0\.1 より古い版です（MFSA-2026-106'
+assert_contains '通常版の Firefox 158.0 は 158.0.1 より古い WARN' "$case_dir/output.txt" 'WARN  Firefox 158\.0（.*Firefox\.app」）は修正版 158\.0\.1 より古い版です（MFSA-2026-106'
 assert_contains 'Firefox の WARN に直し方を含める' "$case_dir/output.txt" 'メニュー → Firefox について で更新'
 
 case_dir="$TEST_TMP/apps-unknown-remedy"
@@ -1482,7 +1506,7 @@ make_fake_app "$apps" 'Sample' com.example.sample 1.0.0
 printf 'app:com.example.sample\t*\t2.0.0\tテスト用\n' > "$minimums"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_APP_DIRS="$apps" RH_SECURITY_MINIMUMS="$minimums"
-assert_contains '名前ごとの案内が無いアプリは汎用の直し方を出す' "$case_dir/output.txt" 'WARN  com\.example\.sample 1\.0\.0（.*Sample\.app）は修正版 2\.0\.0 より古い版です（テスト用）。アプリを最新版へ更新してください'
+assert_contains '名前ごとの案内が無いアプリは汎用の直し方を出す' "$case_dir/output.txt" 'WARN  com\.example\.sample 1\.0\.0（.*Sample\.app」）は修正版 2\.0\.0 より古い版です（テスト用）。アプリを最新版へ更新してください'
 
 case_dir="$TEST_TMP/plex-stopped"
 fake_bin="$case_dir/fake-bin"
@@ -1570,8 +1594,8 @@ assert_contains 'Homebrew の openssl@3 3.4.7 は系列ごとの修正版 3.4.8 
 run_security "$case_dir/d" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.5.9\n'
 assert_not_contains 'Homebrew の openssl@3 3.5.9 は要対応に出さない' "$case_dir/d/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
 run_security "$case_dir/e" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@3 3.3.9\n'
-assert_not_contains '最低版リストに無い系列（openssl@3 3.3.9）は要対応に出さない' "$case_dir/e/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
-assert_contains '最低版リストに無い系列は detail に未掲載と残す' "$case_dir/e/output.txt" 'Homebrew の openssl@3 3\.3\.9 — この系列は最低版リストに未掲載'
+assert_contains '表の最低系列より古い openssl@3 3.3.9 は WARN にする' "$case_dir/e/output.txt" '(WARN|FAIL)  Homebrew の openssl@3'
+assert_contains '古い系列の WARN に表の最低系列を残す' "$case_dir/e/output.txt" 'Homebrew の openssl@3 3\.3\.9 — 古い系列（表の最低系列 3.4 より前）'
 
 case_dir="$TEST_TMP/brew-no-double"
 fake_bin="$case_dir/fake-bin"
@@ -1633,9 +1657,9 @@ printf 'requests==2.0.0\nlitellm==1.107.0\n' > "$REPO_PATH/requirements.txt"
 printf 'litellm==1.106.2\n' > "$REPO_PATH/requirements-dev.txt"
 commit_all
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains '同梱リスト: PhantomSub の名前は任意の版で FAIL' "$case_dir/output.txt" 'FAIL  shipped .*ourin-baileys@9\.9\.9（.*名前だけの一致（全版が対象）・package-lock\.json）'
-assert_contains '同梱リスト: @apexacc/audit は全版 FAIL' "$case_dir/output.txt" 'FAIL  shipped .*@apexacc/audit@0\.0\.1（.*名前だけの一致（全版が対象）'
-assert_contains '同梱リスト: LiteLLM 1.107.0 は requirements.txt で FAIL' "$case_dir/output.txt" 'FAIL  shipped .*pypi:litellm@1\.107\.0（.*版の一致・requirements\.txt）'
+assert_contains '同梱リスト: PhantomSub の名前は任意の版で FAIL' "$case_dir/output.txt" 'FAIL  「shipped」 .*ourin-baileys@9\.9\.9（.*名前だけの一致（全版が対象）・「package-lock\.json」）'
+assert_contains '同梱リスト: @apexacc/audit は全版 FAIL' "$case_dir/output.txt" 'FAIL  「shipped」 .*@apexacc/audit@0\.0\.1（.*名前だけの一致（全版が対象）'
+assert_contains '同梱リスト: LiteLLM 1.107.0 は requirements.txt で FAIL' "$case_dir/output.txt" 'FAIL  「shipped」 .*pypi:litellm@1\.107\.0（.*版の一致・「requirements\.txt」）'
 assert_not_contains '同梱リスト: LiteLLM 1.106.2 は当たらない' "$case_dir/output.txt" 'litellm@1\.106\.2'
 
 case_dir="$TEST_TMP/denylist-custom"
@@ -1652,14 +1676,14 @@ printf '[[package]]\nname = "LiteLLM"\nversion = "1.107.0"\ndescription = "x"\n\
 printf '%s\n' '{"default":{"litellm":{"version":"==1.107.0"}},"develop":{"verpkg":{"version":"==1.0.0"}}}' > "$REPO_PATH/Pipfile.lock"
 commit_all
 RH_DENYLIST="$custom_deny" run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'npm の * 行は任意の版に当たる' "$case_dir/output.txt" 'FAIL  custom .*somepkg@3\.1\.4（名前だけの行・名前だけの一致（全版が対象）・package-lock\.json）'
+assert_contains 'npm の * 行は任意の版に当たる' "$case_dir/output.txt" 'FAIL  「custom」 .*somepkg@3\.1\.4（名前だけの行・名前だけの一致（全版が対象）・「package-lock\.json」）'
 assert_not_contains 'npm の版つきの行は版違いに当たらない' "$case_dir/output.txt" 'verpkg@2\.0\.0'
 assert_not_contains 'npm の名前は正規化しない（大文字小文字違いは当たらない）' "$case_dir/output.txt" 'SomePkg@1\.0\.0'
-assert_contains 'pypi: 行は requirements.txt の litellm==1.107.0 に当たる（名前の正規化）' "$case_dir/output.txt" 'FAIL  custom .*pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・requirements\.txt）'
-assert_contains 'pypi: 行は uv.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・uv\.lock）'
-assert_contains 'pypi: 行は poetry.lock に当たる（名前が LiteLLM でも）' "$case_dir/output.txt" 'pypi:LiteLLM@1\.107\.0（LiteLLM テスト・版の一致・poetry\.lock）'
-assert_contains 'pypi: 行は Pipfile.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・Pipfile\.lock）'
-assert_contains 'pypi: の * 行は PEP 503 の正規化で当たる（Some.Pkg_Name と some_pkg.name）' "$case_dir/output.txt" 'pypi:some_pkg\.name@2\.0（正規化テスト・名前だけの一致（全版が対象）・requirements\.txt）'
+assert_contains 'pypi: 行は requirements.txt の litellm==1.107.0 に当たる（名前の正規化）' "$case_dir/output.txt" 'FAIL  「custom」 .*pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・「requirements\.txt」）'
+assert_contains 'pypi: 行は uv.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・「uv\.lock」）'
+assert_contains 'pypi: 行は poetry.lock に当たる（名前が LiteLLM でも）' "$case_dir/output.txt" 'pypi:LiteLLM@1\.107\.0（LiteLLM テスト・版の一致・「poetry\.lock」）'
+assert_contains 'pypi: 行は Pipfile.lock に当たる' "$case_dir/output.txt" 'pypi:litellm@1\.107\.0（LiteLLM テスト・版の一致・「Pipfile\.lock」）'
+assert_contains 'pypi: の * 行は PEP 503 の正規化で当たる（Some.Pkg_Name と some_pkg.name）' "$case_dir/output.txt" 'pypi:some_pkg\.name@2\.0（正規化テスト・名前だけの一致（全版が対象）・「requirements\.txt」）'
 assert_not_contains 'litellm==1.106.2 は当たらない' "$case_dir/output.txt" 'litellm@1\.106\.2|requirements-old\.txt'
 assert_not_contains 'toml ロックの下位の表（[package.dependencies]）の name は読まない' "$case_dir/output.txt" 'pypi:some-pkg-name@'
 assert_not_contains 'pypi: 行は npm の package-lock.json（npm の litellm）に当たらない' "$case_dir/output.txt" 'litellm@1\.107\.0（[^）]*）[^）]*package-lock\.json'
@@ -1672,7 +1696,7 @@ printf '[[package]]\nname = "litellm"\nversion = "1.107.0"\n' > "$REPO_PATH/uv.l
 printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/keyv":{"version":"6.0.0"}}}' > "$REPO_PATH/package-lock.json"
 run_health "$case_dir" "$case_dir/root with space"
 assert_not_contains '追跡外の Python のファイルは見ない' "$case_dir/output.txt" 'litellm'
-assert_contains 'ルートの package-lock.json は今までどおり追跡外でも見る' "$case_dir/output.txt" 'FAIL  untracked .*keyv@6\.0\.0'
+assert_contains 'ルートの package-lock.json は今までどおり追跡外でも見る' "$case_dir/output.txt" 'FAIL  「untracked」 .*keyv@6\.0\.0'
 
 case_dir="$TEST_TMP/actions-bad"
 mkdir -p "$case_dir"
@@ -1683,8 +1707,8 @@ printf 'name: deploy\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n     
 commit_all
 printf 'jobs:\n  c:\n    steps:\n      - uses: actions-cool/maintain-one-comment@v1\n' > "$REPO_PATH/.github/workflows/untracked.yml"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'uses: actions-cool/issues-helper@v3 は FAIL' "$case_dir/output.txt" 'FAIL  actionsrepo — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。workflow から外し、そのリポの secret を入れ替えてください（.*ci\.yml）'
-assert_contains '大文字小文字違い・下のパスつきの Actions-Cool/Issues-Helper/sub@sha も FAIL' "$case_dir/output.txt" 'FAIL  actionsrepo — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。.*deploy\.yaml'
+assert_contains 'uses: actions-cool/issues-helper@v3 は FAIL' "$case_dir/output.txt" 'FAIL  「actionsrepo」 — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。workflow から外し、そのリポの secret を入れ替えてください（.*ci\.yml」）'
+assert_contains '大文字小文字違い・下のパスつきの Actions-Cool/Issues-Helper/sub@sha も FAIL' "$case_dir/output.txt" 'FAIL  「actionsrepo」 — 侵害された GitHub Action（actions-cool/issues-helper）を使っています。.*deploy\.yaml'
 assert_not_contains 'コメントアウトした行と追跡外の workflow は見ない' "$case_dir/output.txt" 'maintain-one-comment'
 assert_not_contains 'ほかの action（actions/checkout）は FAIL にしない' "$case_dir/output.txt" 'GitHub Action（actions/checkout）'
 
@@ -1705,9 +1729,9 @@ printf 'jobs:\n  a:\n    steps:\n      - uses: acme/evil@v1\n' > "$REPO_PATH/.gi
 commit_all
 printf '# 見出し\nacme/evil\tテスト用の理由\n' > "$case_dir/actions.tsv"
 RH_ACTIONS_DENYLIST="$case_dir/actions.tsv" run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'RH_ACTIONS_DENYLIST で表を差し替えられる' "$case_dir/output.txt" 'FAIL  customactions — 侵害された GitHub Action（acme/evil）を使っています。.*テスト用の理由'
+assert_contains 'RH_ACTIONS_DENYLIST で表を差し替えられる' "$case_dir/output.txt" 'FAIL  「customactions」 — 侵害された GitHub Action（acme/evil）を使っています。.*テスト用の理由'
 RH_ACTIONS_DENYLIST="$case_dir/missing.tsv" run_health "$case_dir" "$case_dir/root with space"
-assert_contains '表が無いときは照合が動いていない FAIL' "$case_dir/output.txt" 'FAIL  customactions — GitHub Actions 照合が動いていません（同梱リスト不足）'
+assert_contains '表が無いときは照合が動いていない FAIL' "$case_dir/output.txt" 'FAIL  「customactions」 — GitHub Actions 照合が動いていません（同梱リスト不足）'
 
 # ---- 0.4.3: Mac のセキュリティ点検だけを動かす設定 ----
 
@@ -1725,7 +1749,7 @@ git -C "$REPO_PATH" fetch -q origin
 printf 'local change\n' >> "$REPO_PATH/README.md"
 : > "$case_dir/git.trace"
 run_security_only "$case_dir" "$case_dir/root with space" GIT_TRACE="$case_dir/git.trace"
-assert_not_contains 'security-only は dirty・behind の WARN を出さない' "$case_dir/output.txt" 'WARN  securedirty .*dirty|WARN  securedirty .*behind'
+assert_not_contains 'security-only は dirty・behind の WARN を出さない' "$case_dir/output.txt" 'WARN  「securedirty」 .*dirty|WARN  「securedirty」 .*behind'
 assert_contains 'security-only の見出しは Mac のセキュリティ点検' "$case_dir/output.txt" '^# Mac のセキュリティ点検$'
 assert_not_contains 'security-only は git fetch を呼ばない' "$case_dir/git.trace" 'git fetch| fetch '
 assert_not_contains 'security-only の参考にリポ・CLI の件数行を出さない' "$case_dir/output.txt" '^- (作業中|同期待ち|CLI 更新あり):'
@@ -1737,7 +1761,7 @@ printf '{"name":"fixture","version":"1.0.0"}\n' > "$REPO_PATH/package.json"
 printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture"},"node_modules/keyv":{"version":"6.0.0"}}}' > "$REPO_PATH/package-lock.json"
 commit_all
 run_security_only "$case_dir" "$case_dir/root with space"
-assert_contains 'security-only でも侵害パッケージを FAIL にする' "$case_dir/output.txt" 'FAIL  securitydeny .*keyv@6\.0\.0'
+assert_contains 'security-only でも侵害パッケージを FAIL にする' "$case_dir/output.txt" 'FAIL  「securitydeny」 .*keyv@6\.0\.0'
 
 case_dir="$TEST_TMP/security-only-actions"
 mkdir -p "$case_dir"
@@ -1746,7 +1770,7 @@ mkdir -p "$REPO_PATH/.github/workflows"
 printf 'jobs:\n  a:\n    steps:\n      - uses: actions-cool/issues-helper@v3\n' > "$REPO_PATH/.github/workflows/ci.yml"
 commit_all
 run_security_only "$case_dir" "$case_dir/root with space"
-assert_contains 'security-only でも侵害 Actions を FAIL にする' "$case_dir/output.txt" 'FAIL  securityactions — 侵害された GitHub Action（actions-cool/issues-helper）'
+assert_contains 'security-only でも侵害 Actions を FAIL にする' "$case_dir/output.txt" 'FAIL  「securityactions」 — 侵害された GitHub Action（actions-cool/issues-helper）'
 
 case_dir="$TEST_TMP/security-only-venv"
 fake_bin="$case_dir/fake-bin"
@@ -1760,7 +1784,7 @@ make_python_site "$site" 26.2.1 2026.10.18
 make_exit_command "$venv/bin/python" 0
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SECURITY_ONLY=1
-assert_contains 'security-only でもリポの venv の古い pip を WARN にする' "$case_dir/output.txt" 'WARN  Python（fixture/\.venv）.*pip 26\.2\.1'
+assert_contains 'security-only でもリポの venv の古い pip を WARN にする' "$case_dir/output.txt" 'WARN  Python（「fixture」/「.venv」）.*pip 26\.2\.1'
 
 case_dir="$TEST_TMP/security-only-empty"
 mkdir -p "$case_dir/empty"
@@ -2035,7 +2059,7 @@ make_fake_brew "$fake_bin"
 make_fake_bun "$bun_path"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT='1.3.11'
-assert_contains 'Bun 1.3.11 は修正版 1.4.4 より古い WARN' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11（.*\.bun/bin/bun）は修正版 1\.4\.4 より古い版です（CVE-2026-111497'
+assert_contains 'Bun 1.3.11 は修正版 1.4.4 より古い WARN' "$case_dir/output.txt" 'WARN  Bun 1\.3\.11（.*\.bun/bin/bun」）は修正版 1\.4\.4 より古い版です（CVE-2026-111497'
 assert_contains '.bun/bin/bun の WARN は bun upgrade を案内する' "$case_dir/output.txt" 'bun upgrade で更新してください'
 
 case_dir="$TEST_TMP/bun-fixed"
@@ -2055,7 +2079,7 @@ make_fake_brew "$fake_bin"
 make_fake_bun "$bun_path"
 : > "$case_dir/brew.log"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_BUN_CANDIDATES="$bun_path" FAKE_BUN_OUTPUT=''
-assert_contains '版を返さない Bun は未検査の NOTES' "$case_dir/output.txt" 'Bun（.*bin/bun）— 版を判定できず未検査'
+assert_contains '版を返さない Bun は未検査の NOTES' "$case_dir/output.txt" 'Bun（.*bin/bun」）— 版を判定できず未検査'
 assert_not_contains '版を返さない Bun は WARN にしない' "$case_dir/output.txt" '(WARN|FAIL)  Bun '
 
 case_dir="$TEST_TMP/bun-cellar"
@@ -2366,7 +2390,7 @@ claude_times='{"2.1.250":"2020-01-01T00:00:00Z","2.1.300":"2020-01-02T00:00:00Z"
 run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 \
   RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250' FAKE_CLAUDE_LATEST=2.1.310 \
   FAKE_CLAUDE_TIME_JSON="$claude_times"
-assert_contains 'CLI の上げ先は公開3日以上の版にする' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300（最新 2\.1\.310 は .*公開・3 日待ち）'
+assert_contains 'CLI の上げ先は公開3日以上の版にする' "$case_dir/output.txt" 'claude 2\.1\.250 → 2\.1\.300.*（最新 2\.1\.310 は .*公開・3 日待ち）'
 
 # ---- 0.6.0: 見逃し・更新の巻き込み・点検の継続 ----
 
@@ -2418,12 +2442,12 @@ for name in (".env.local", ".env.production"):
 PY
 commit_all
 run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
-assert_contains '追跡中の .env.local の service_role は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.local'
-assert_contains '追跡中の .env.production の service_role は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.production'
-assert_contains '見本ファイルでも実値の秘密は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.sample'
+assert_contains '追跡中の .env.local の service_role は FAIL' "$case_dir/output.txt" 'FAIL  「secrets」 .*\.env\.local'
+assert_contains '追跡中の .env.production の service_role は FAIL' "$case_dir/output.txt" 'FAIL  「secrets」 .*\.env\.production'
+assert_contains '見本ファイルでも実値の秘密は FAIL' "$case_dir/output.txt" 'FAIL  「secrets」 .*\.env\.sample'
 assert_not_contains '空・1Password・見本値だけのテンプレートは除外する' "$case_dir/output.txt" 'FAIL .*\.env\.example'
 assert_not_contains 'anon JWT は秘密の検出対象にしない' "$case_dir/output.txt" 'FAIL .*anon\.ts'
-assert_contains '追加した秘密の型をソースでも検出する' "$case_dir/output.txt" 'FAIL .*types\.ts:[0-9]+'
+assert_contains '追加した秘密の型をソースでも検出する' "$case_dir/output.txt" 'FAIL .*types\.ts」:[0-9]+'
 assert_not_contains '単語の途中・見本の値・localhost の接続 URL は鍵として数えない' "$case_dir/output.txt" 'FAIL .*samples\.md'
 if python3 - "$case_dir/output.txt" "$REPO_PATH" <<'PY'
 import re
@@ -2479,7 +2503,7 @@ SH
       commit_all ;;
   esac
   run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_DENY_SCANNER="$scanner" FAKE_REAL_PERL="${real_perl:-/usr/bin/perl}"
-  assert_contains "$scenario: 照合不能を FAIL で知らせる" "$case_dir/output.txt" 'FAIL  scanerror .*侵害パッケージ照合.*(異常終了|動いていません)'
+  assert_contains "$scenario: 照合不能を FAIL で知らせる" "$case_dir/output.txt" 'FAIL  「scanerror」 .*侵害パッケージ照合.*(異常終了|動いていません)'
 done
 
 # 対応する各 lock の書式を実際の照合へ渡します。
@@ -2497,7 +2521,7 @@ for format in pnpm-old pnpm-new yarn-v1 yarn-berry bun shrinkwrap; do
   esac
   commit_all
   run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
-  assert_contains "$format: 侵害版を照合して FAIL にする" "$case_dir/output.txt" 'FAIL  lockrepo .*keyv@6\.0\.0'
+  assert_contains "$format: 侵害版を照合して FAIL にする" "$case_dir/output.txt" 'FAIL  「lockrepo」 .*keyv@6\.0\.0'
 done
 
 case_dir="$TEST_TMP/k1-bun-binary"
@@ -2524,7 +2548,7 @@ SH
 chmod +x "$fake_bin/npm"
 printf 'auditrepo\tallowed-pkg\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
-assert_contains '据え置き外の high が残ると FAIL にする' "$case_dir/output.txt" 'FAIL  auditrepo .*据え置き 1 件・据え置き外 1 件'
+assert_contains '据え置き外の high が残ると FAIL にする' "$case_dir/output.txt" 'FAIL  「auditrepo」 .*据え置き 1 件・据え置き外 1 件'
 printf 'auditrepo\tGHSA-aaaa-bbbb-cccc,other-pkg\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
 assert_not_contains '複数の GHSA・パッケージに一致すれば FAIL を出さない' "$case_dir/output.txt" 'FAIL .*critical/high'
@@ -2838,7 +2862,7 @@ SH
     run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 \
       FAKE_AUDIT_ARGS="$case_dir/args.log" FAKE_AUDIT_RESULT="$case_dir/result.json"
     if [ "$severity" = high ]; then
-      assert_contains "$tool: audit の high は FAIL にする" "$case_dir/output.txt" 'FAIL  audittool .*critical/high'
+      assert_contains "$tool: audit の high は FAIL にする" "$case_dir/output.txt" 'FAIL  「audittool」 .*critical/high'
     else
       assert_not_contains "$tool: audit の指摘なしは WARN・FAIL を出さない" "$case_dir/output.txt" '(FAIL|WARN).*audit.*(実行不能|critical/high)'
     fi
@@ -2864,7 +2888,7 @@ SH
 chmod +x "$fake_bin/npm"
 printf 'advisories\tGHSA-aaaa-bbbb-cccc\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
-assert_contains '同じパッケージの別 GHSA まで据え置きにしない' "$case_dir/output.txt" 'FAIL  advisories .*据え置き 1 件・据え置き外 1 件'
+assert_contains '同じパッケージの別 GHSA まで据え置きにしない' "$case_dir/output.txt" 'FAIL  「advisories」 .*据え置き 1 件・据え置き外 1 件'
 
 case_dir="$TEST_TMP/k1-node-transient"
 fake_bin="$case_dir/fake-bin"
@@ -2907,8 +2931,8 @@ git -C "$REPO_PATH" add .gitignore
 git -C "$REPO_PATH" add -f .env.local .env.production
 git -C "$REPO_PATH" commit -q -m 'test: tracked env fixtures'
 run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
-assert_contains '空でも追跡中の .env.local は FAIL' "$case_dir/output.txt" 'FAIL  envpolicy .*\.env\.local'
-assert_contains '見本名以外の追跡中 env は参照値だけでも FAIL' "$case_dir/output.txt" 'FAIL  envpolicy .*\.env\.production'
+assert_contains '空でも追跡中の .env.local は FAIL' "$case_dir/output.txt" 'FAIL  「envpolicy」 .*\.env\.local'
+assert_contains '見本名以外の追跡中 env は参照値だけでも FAIL' "$case_dir/output.txt" 'FAIL  「envpolicy」 .*\.env\.production'
 
 # 未検査の連続は日が空いたら数え直します。
 case_dir="$TEST_TMP/k1-unchecked-gap"
@@ -2984,6 +3008,275 @@ assert_contains 'npm audit の空 object を指摘なしと見なさない' "$ca
 run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/fake-bin" RH_SKIP_AUDIT=0 \
   FAKE_AUDIT_JSON='{"vulnerabilities":{},"metadata":{"vulnerabilities":{"high":1}}}'
 assert_contains '詳細の欠けた high も据え置き外に残す' "$case_dir/output.txt" 'FAIL .*据え置き外 1 件'
+
+# ---- 0.6.0: ノイズ・導入環境・公開レポート ----
+# 本体の関数だけを取り出し、実機の点検を起動せず境界条件を確かめます。
+unit_library="$TEST_TMP/k1b-functions.sh"
+python3 - "$HEALTH" "$unit_library" <<'PY_UNIT'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+names = ('clean_text', 'quote_name', 'is_uint', 'add_node_paths', 'file_owner', 'file_mode', 'check_config_safety', 'fatal', 'add_failure', 'add_protected_failure', 'add_warning', 'add_detail', 'apply_allowances', 'run_timeout', 'streak_key', 'streak_file', 'streak_bump', 'streak_reset', 'repo_state_key', 'rotate_log', 'version_less_than', 'npm_release_info', 'npm_package_for_cli', 'real_path_of', 'cli_is_npm', 'cli_remedy', 'update_cli', 'lookup_minimum_row', 'warn_old_series', 'current_version', 'latest_version', 'check_cli_tools')
+parts = []
+for name in names:
+    match = re.search(r'^' + name + r'\(\) \{[^\n]*', text, re.M)
+    if not match:
+        raise SystemExit('missing function: ' + name)
+    end = match.end() if match.group().endswith('}') else re.search(r'^\}', text[match.end():], re.M).end() + match.end()
+    parts.append(text[match.start():end])
+Path(sys.argv[2]).write_text('\n'.join(parts) + '\n')
+PY_UNIT
+
+case_dir="$TEST_TMP/k1b-allow"
+mkdir -p "$case_dir/tmp" "$case_dir/state"
+cat > "$case_dir/unit.sh" <<'SH'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$UNIT_LIBRARY"
+TMP_DIR="$CASE_DIR/tmp"; STATE_DIR="$CASE_DIR/state"
+ALLOW_FILE="$CASE_DIR/allow.tsv"; RH_TODAY=2026-11-16
+FAILURES=(); WARNINGS=(); NOTES=()
+printf 'origin 未設定\t2026-11-23\t手元用\nサポート終了\t2026-11-15\t旧環境\n説明用\t2026-12-01\t教材\n侵害パッケージ\t2026-12-01\t試験\ncommit 済み\t2026-12-01\t試験\n長すぎる期限\t2027-11-16\t試験\n理由なし\t2026-12-01\t\n期限なし\t\t試験\n' > "$ALLOW_FILE"
+add_warning '「local」 — origin 未設定'
+add_warning 'サポート終了'
+add_warning '長すぎる期限'
+add_warning '理由なし'
+add_warning '期限なし'
+add_failure '説明用の FAIL'
+add_protected_failure '侵害パッケージの FAIL'
+add_protected_failure '鍵が commit 済み'
+apply_allowances
+printf 'COUNTS %s %s\n' "${#FAILURES[@]}" "${#WARNINGS[@]}"
+printf 'FAIL %s\n' "${FAILURES[@]}"
+printf 'WARN %s\n' "${WARNINGS[@]}"
+printf 'NOTE %s\n' "${NOTES[@]}"
+SH
+UNIT_LIBRARY="$unit_library" CASE_DIR="$case_dir" "$TEST_BASH" "$case_dir/unit.sh" > "$case_dir/output.txt" 2>&1
+assert_contains '据え置いた WARN と通常 FAIL を件数から外す' "$case_dir/output.txt" '^COUNTS 2 4$'
+assert_contains '据え置いた指摘は期限付き参考に残す' "$case_dir/output.txt" '参考（据え置き中・期限 2026-11-23）WARN'
+assert_contains '期限7日前から予告する' "$case_dir/output.txt" '据え置きの期限が近い: 2026-11-23'
+assert_contains '期限切れは WARN に戻す' "$case_dir/output.txt" '^WARN サポート終了$'
+assert_contains '侵害パッケージは据え置けない' "$case_dir/output.txt" '^FAIL 侵害パッケージの FAIL$'
+assert_contains '追跡中の鍵は据え置けない' "$case_dir/output.txt" '^FAIL 鍵が commit 済み$'
+assert_count '据え置き不可の注記も出す' "$case_dir/output.txt" 'NOTE 据え置き不可' 2
+assert_contains '180日を超える期限は無効' "$case_dir/output.txt" '^WARN 長すぎる期限$'
+assert_count '期限や理由の欠けた行も無効にする' "$case_dir/output.txt" '行目は無効' 3
+
+case_dir="$TEST_TMP/k1b-npm"
+mkdir -p "$case_dir/fake-bin" "$case_dir/tmp"
+cat > "$case_dir/fake-bin/npm" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$CASE_DIR/npm.log"
+cat "$CASE_DIR/metadata.json"
+SH
+chmod +x "$case_dir/fake-bin/npm"
+cat > "$case_dir/unit.sh" <<'SH'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$UNIT_LIBRARY"
+TMP_DIR="$CASE_DIR/tmp"
+if npm_release_info fixture 1.0.0; then printf 'TARGET %s\n' "$NPM_TARGET"; else printf 'UNCHECKED\n'; fi
+SH
+for scenario in missing-tag missing-version deprecated per-version-deprecated; do
+  case "$scenario" in
+    missing-tag) metadata='{"time":{"2.0.0":"2020-01-01T00:00:00Z"},"versions":["2.0.0"],"dist-tags":{}}';;
+    missing-version) metadata='{"time":{"1.5.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-01T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"},"versions":["1.5.0","3.0.0"],"dist-tags":{"latest":"3.0.0"}}';;
+    deprecated) metadata='{"time":{"1.5.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-01T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"},"versions":["1.5.0","2.0.0","3.0.0"],"dist-tags":{"latest":"3.0.0"},"deprecated":{"2.0.0":"withdrawn"}}';;
+    per-version-deprecated) metadata='[{"version":"1.5.0","time":{"1.5.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-01T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"},"versions":["1.5.0","2.0.0","3.0.0"],"dist-tags":{"latest":"3.0.0"}},{"version":"2.0.0","deprecated":"withdrawn"},{"version":"3.0.0","time":{"1.5.0":"2020-01-01T00:00:00Z","2.0.0":"2020-01-01T00:00:00Z","3.0.0":"2999-01-01T00:00:00Z"},"versions":["1.5.0","2.0.0","3.0.0"],"dist-tags":{"latest":"3.0.0"}}]';;
+  esac
+  printf '%s\n' "$metadata" > "$case_dir/metadata.json"
+  : > "$case_dir/npm.log"
+  PATH="$case_dir/fake-bin:$PATH" UNIT_LIBRARY="$unit_library" CASE_DIR="$case_dir" "$TEST_BASH" "$case_dir/unit.sh" > "$case_dir/output.txt" 2>&1
+  if [ "$scenario" = missing-tag ]; then
+    assert_contains 'dist-tags.latest 取得失敗は上げ先なし' "$case_dir/output.txt" '^UNCHECKED$'
+  else
+    assert_contains "$scenario: 配布中かつ非推奨でない古い版だけを選ぶ" "$case_dir/output.txt" '^TARGET 1\.5\.0$'
+  fi
+  assert_count "$scenario: npm の問い合わせは一度だけ" "$case_dir/npm.log" '^view fixture@\* time dist-tags versions deprecated version --json$' 1
+ done
+
+case_dir="$TEST_TMP/k1b-path"
+mkdir -p "$case_dir/home/.nvm/alias" "$case_dir/home/.nvm/versions/node/v24.1.0/bin" "$case_dir/home/.nvm/versions/node/v24.2.0/bin" "$case_dir/home/.nvm/versions/node/v2.9.0/bin" "$case_dir/npm-location"
+printf '24\n' > "$case_dir/home/.nvm/alias/default"
+cat > "$case_dir/home/.nvm/versions/node/v24.2.0/bin/npm" <<'SH'
+#!/bin/bash
+printf 'fake-nvm-npm\n'
+SH
+chmod +x "$case_dir/home/.nvm/versions/node/v24.2.0/bin/npm"
+cat > "$case_dir/unit.sh" <<'SH'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$UNIT_LIBRARY"
+RH_NPM_DIR="$CASE_DIR/npm-location"
+add_node_paths
+case ":$PATH:" in *":$HOME/.nvm/versions/node/v24.2.0/bin:"*) printf 'NVM OK\n';; esac
+case ":$PATH:" in *":$RH_NPM_DIR:"*) printf 'NPM-DIR OK\n';; esac
+npm
+# 小さい系列番号が24に前方一致しないことも確かめます。
+printf '2\n' > "$HOME/.nvm/alias/default"
+PATH=/usr/bin:/bin
+add_node_paths
+case ":$PATH:" in *":$HOME/.nvm/versions/node/v2.9.0/bin:"*) printf 'NVM-SERIES OK\n';; esac
+case ":$PATH:" in *":$HOME/.nvm/versions/node/v24.2.0/bin:"*) exit 1;; esac
+SH
+HOME="$case_dir/home" PATH=/usr/bin:/bin UNIT_LIBRARY="$unit_library" CASE_DIR="$case_dir" "$TEST_BASH" "$case_dir/unit.sh" > "$case_dir/output.txt" 2>&1
+assert_contains '偽 HOME の nvm default から最新の同系列を探す' "$case_dir/output.txt" '^NVM OK$'
+assert_contains 'install 時に記録した npm の場所も PATH に加える' "$case_dir/output.txt" '^NPM-DIR OK$'
+assert_contains 'nvm の偽 npm を実行できる' "$case_dir/output.txt" '^fake-nvm-npm$'
+assert_contains 'nvm の系列番号を取り違えない' "$case_dir/output.txt" '^NVM-SERIES OK$'
+
+case_dir="$TEST_TMP/k1b-names-log-state"
+mkdir -p "$case_dir/tmp" "$case_dir/state" "$case_dir/a/same" "$case_dir/b/same"
+cat > "$case_dir/unit.sh" <<'SH'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$UNIT_LIBRARY"
+STATE_DIR="$CASE_DIR/state"
+printf '%s\n' "$(quote_name $'report\nFAIL injected\r\tfile')"
+long="$(python3 -c 'print("名" * 140, end="")')"
+printf '%s\n' "$(quote_name "$long")" | python3 -c 'import sys; s=sys.stdin.read().strip(); print("NAME-LENGTH", len(s)-2)'
+printf '2026-11-15 4\n' > "$(streak_file dirty-same)"
+repo_state_key "$CASE_DIR/a/same"; first="$REPO_STATE_KEY"
+printf 'MIGRATED %s\n' "$(cat "$(streak_file "dirty-$first")")"
+repo_state_key "$CASE_DIR/b/same"; second="$REPO_STATE_KEY"
+[ "$first" = "$second" ] || printf 'SEPARATE\n'
+printf '2026-11-16 9\n' > "$(streak_file "dirty-$first")"
+printf 'OTHER %s\n' "$(cat "$(streak_file "dirty-$second")")"
+streak_reset "dirty-$first"
+repo_state_key "$CASE_DIR/a/same"
+[ -f "$(streak_file "dirty-$first")" ] || printf 'MIGRATION ONCE\n'
+python3 - "$CASE_DIR" <<'PY'
+from pathlib import Path
+import sys
+for name in ('history', 'launch'):
+    (Path(sys.argv[1]) / name).write_bytes(b'a' * 5242880)
+PY
+rotate_log "$CASE_DIR/history"
+[ -f "$CASE_DIR/history.1" ] || printf 'AT-LIMIT KEPT\n'
+printf 'b' >> "$CASE_DIR/history"
+rotate_log "$CASE_DIR/history"
+[ ! -e "$CASE_DIR/history" ] && [ -f "$CASE_DIR/history.1" ] && printf 'HISTORY ROTATED\n'
+exec 9>> "$CASE_DIR/launch"
+printf 'b' >&9
+rotate_log "$CASE_DIR/launch" truncate
+printf 'next\n' >&9
+[ "$(cat "$CASE_DIR/launch")" = next ] && printf 'LAUNCH DESCRIPTOR OK\n'
+[ -f "$CASE_DIR/launch.1" ] && printf 'LAUNCH ROTATED\n'
+SH
+UNIT_LIBRARY="$unit_library" CASE_DIR="$case_dir" "$TEST_BASH" "$case_dir/unit.sh" > "$case_dir/output.txt" 2>&1
+assert_contains '改行・CR・タブのある名前も1行の引用に収める' "$case_dir/output.txt" '^「report FAIL injected  file」$'
+assert_not_contains 'ファイル名から偽の FAIL 行を作れない' "$case_dir/output.txt" '^FAIL injected'
+assert_contains '名前は120字で切る' "$case_dir/output.txt" '^NAME-LENGTH 120$'
+assert_contains '既存の日数状態を引き継ぐ' "$case_dir/output.txt" '^MIGRATED 2026-11-15 4$'
+assert_contains '同名リポは状態キーを分ける' "$case_dir/output.txt" '^SEPARATE$'
+assert_contains '解除した日数を旧状態から復活させない' "$case_dir/output.txt" '^MIGRATION ONCE$'
+assert_contains '別ルートの日数は連動しない' "$case_dir/output.txt" '^OTHER 2026-11-15 4$'
+assert_contains 'ちょうど5MBでは回転しない' "$case_dir/output.txt" '^AT-LIMIT KEPT$'
+assert_contains '5MBを超えた履歴を回転する' "$case_dir/output.txt" '^HISTORY ROTATED$'
+assert_contains 'launchd の開いている出力先でも回転後の記録が残る' "$case_dir/output.txt" '^LAUNCH DESCRIPTOR OK$'
+assert_contains 'launchd の旧ログを一世代残す' "$case_dir/output.txt" '^LAUNCH ROTATED$'
+
+case_dir="$TEST_TMP/k1b-env-names"
+make_remote_repo "$case_dir" names
+printf '.env.*\n' > "$REPO_PATH/.gitignore"
+printf 'PORT=3000\n' > "$REPO_PATH/.env.production"
+printf '%s\n' '-----BEGIN PRIVATE KEY-----' > "$REPO_PATH/"$'first\nWARN injected.txt'
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains 'gitignore 済みの標準 env は参考に出す' "$case_dir/output.txt" 'gitignore 済みの env ファイル 「.env.production」'
+assert_not_contains 'gitignore 済みの標準 env は WARN にしない' "$case_dir/output.txt" 'WARN .*git に入るおそれのある env ファイル'
+assert_contains '改行入りファイルの FAIL は引用した1行に収める' "$case_dir/output.txt" 'FAIL .*「first WARN injected.txt」:1'
+assert_not_contains '改行入りファイルから独立した WARN を作らない' "$case_dir/output.txt" '^WARN injected'
+
+case_dir="$TEST_TMP/k1b-claude-old"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_claude "$fake_bin/claude"
+run_security "$case_dir" "$fake_bin" RH_SECURITY_ONLY=1 RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT=1.0.128 FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_LIST_LOG="$case_dir/list.log"
+assert_count '最低版の点検は brew list --versions を引数なしで一度だけ取得する' "$case_dir/list.log" '^list --versions$' 1
+assert_contains 'security-only でも claude 1.x を古い系列として WARN にする' "$case_dir/output.txt" 'WARN  Claude Code 1\.0\.128 — 古い系列（表の最低系列 2 より前）'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LIST_RC=1 FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains '導入済み brew の版を取れなければ最低版は未検査' "$case_dir/output.txt" 'Homebrew の最低版は導入済み版を取得できず未検査'
+
+case_dir="$TEST_TMP/k1b-plist-fallback"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_app "$case_dir/apps" 'Test Browser' com.google.Chrome 156.0.8078.78
+printf '#!/bin/bash\nexit 1\n' > "$fake_bin/plutil"
+chmod +x "$fake_bin/plutil"
+run_security "$case_dir" "$fake_bin" RH_APP_DIRS="$case_dir/apps" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains 'plutil raw 失敗時も PlistBuddy で最低版を読める' "$case_dir/output.txt" 'WARN  Chrome 156\.0\.8078\.78'
+printf 'invalid plist\n' > "$case_dir/apps/Test Browser.app/Contents/Info.plist"
+run_security "$case_dir" "$fake_bin" RH_APP_DIRS="$case_dir/apps" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains 'アプリがあって一件も読めなければ未検査' "$case_dir/output.txt" 'アプリの最低版は Info.plist を一件も読めず未検査'
+
+case_dir="$TEST_TMP/k1b-native-cli"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_cli_set "$fake_bin"
+make_fake_claude "$case_dir/home/.local/bin/claude"
+run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 \
+  PATH="$case_dir/home/.local/bin:$fake_bin:/usr/bin:/bin" \
+  RH_CLAUDE_CANDIDATES="$case_dir/home/.local/bin/claude" FAKE_CLAUDE_OUTPUT=2.1.250 \
+  FAKE_CLAUDE_LATEST=3.0.0 FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains 'native claude は現在版・上げ先・直し方を WARN にする' "$case_dir/output.txt" 'WARN  claude 2\.1\.250 → 3\.0\.0（claude update'
+assert_not_contains 'native claude は自動更新しない' "$case_dir/output.txt" 'claude .*を自動更新'
+
+case_dir="$TEST_TMP/k1b-node-lts"
+mkdir -p "$case_dir/tmp"
+cat > "$case_dir/unit.sh" <<'SH'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$UNIT_LIBRARY"
+TMP_DIR="$CASE_DIR/tmp"; SECURITY_MINIMUMS="$MINIMUMS"
+RH_SKIP_CLI=0; RH_AUTOFIX_CLI=1
+CLI_UPDATES=(); WARNINGS=(); NOTES=(); AUTOFIXED=()
+# 外部コマンドの探索もこのシェルの中だけで置き換えます。
+command() { if [ "${1:-}" = -v ] && [ "${2:-}" = node ]; then printf '/fixture/node\n'; else return 1; fi; }
+current_version() { printf '24.22.1\n'; }
+latest_version() { printf '26.12.1\n'; }
+check_cli_tools
+printf 'WARN-COUNT %s\n' "${#WARNINGS[@]}"
+printf 'NOTE %s\n' "${CLI_UPDATES[@]}"
+SH
+UNIT_LIBRARY="$unit_library" CASE_DIR="$case_dir" MINIMUMS="$PROJECT_DIR/config/security-minimums.tsv" "$TEST_BASH" "$case_dir/unit.sh" > "$case_dir/output.txt" 2>&1
+assert_contains 'サポート中の LTS は次系列の更新を WARN にしない' "$case_dir/output.txt" '^WARN-COUNT 0$'
+assert_contains 'サポート中の LTS の更新案内は参考に出す' "$case_dir/output.txt" 'サポート中の LTS 系列 24\.22\.1 → 26\.12\.1'
+
+case_dir="$TEST_TMP/k1b-install-retry"
+fake_bin="$case_dir/fake-bin"
+mkdir -p "$case_dir/home" "$fake_bin" "$case_dir/home/.nvm/alias" "$case_dir/home/.nvm/versions/node/v24.2.0/bin"
+printf 'v24.2.0\n' > "$case_dir/home/.nvm/alias/default"
+cat > "$fake_bin/launchctl" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$CASE_DIR/launchctl.log"
+case "$1" in
+  bootout) exit 0;;
+  bootstrap) if [ ! -f "$CASE_DIR/tried" ]; then : > "$CASE_DIR/tried"; exit 5; fi; : > "$CASE_DIR/registered";;
+  print) [ -f "$CASE_DIR/registered" ];;
+esac
+SH
+chmod +x "$fake_bin/launchctl"
+HOME="$case_dir/home" PATH="$fake_bin:$PATH" CASE_DIR="$case_dir" \
+  RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_NO_DESKTOP=1 RH_SKIP_SECURITY=1 \
+  "$TEST_BASH" "$PROJECT_DIR/install.sh" > "$case_dir/output.txt" 2>&1
+retry_rc=$?
+if [ "$retry_rc" -eq 0 ]; then pass '一度失敗した bootstrap を再試行して install を完了する'; else fail '一度失敗した bootstrap を再試行して install を完了する'; fi
+assert_count 'bootstrap は成功まで二度呼ぶ' "$case_dir/launchctl.log" '^bootstrap ' 2
+assert_contains '定期実行の登録を print で確認する' "$case_dir/launchctl.log" '^print gui/[0-9]+/com.repo-health-kit$'
+python3 - "$case_dir/home/Library/LaunchAgents/com.repo-health-kit.plist" "$case_dir/home" > "$case_dir/plist-path.txt" <<'PY_PATH'
+import plistlib
+import sys
+from pathlib import Path
+with open(sys.argv[1], 'rb') as handle:
+    paths = plistlib.load(handle)['EnvironmentVariables']['PATH'].split(':')
+if str(Path(sys.argv[2]) / '.nvm/versions/node/v24.2.0/bin') in paths:
+    print('PLIST NVM OK')
+PY_PATH
+assert_contains 'plist にも nvm の既定 bin を足す' "$case_dir/plist-path.txt" '^PLIST NVM OK$'
+assert_contains 'npm の場所を設定に残す'  "$case_dir/home/.config/repo-health-kit/config.sh" '^RH_NPM_DIR='
+assert_contains '手元の clone の場所を設定に残す' "$case_dir/home/.config/repo-health-kit/config.sh" '^RH_CLONE_DIR='
+if [ -f "$case_dir/home/.config/repo-health-kit/allow.tsv" ]; then pass 'install で空の据え置き表を作る'; else fail 'install で空の据え置き表を作る'; fi
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

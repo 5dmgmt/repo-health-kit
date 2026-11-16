@@ -16,7 +16,7 @@ cd repo-health-kit
 ./install.sh
 ```
 
-本体は `~/Library/Application Support/repo-health-kit/`、設定は `~/.config/repo-health-kit/config.sh` に入ります。設定がすでにある場合、installer は上書きしません。点検対象の初期値は `~/Plugins` の直下です。
+本体は `~/Library/Application Support/repo-health-kit/`、設定は `~/.config/repo-health-kit/config.sh` に入ります。設定がすでにある場合は引き継ぎ、npm と clone の場所だけを記録し直します。点検対象の初期値は `~/Plugins` の直下です。
 
 必要なコマンドは `bash`、`git`、`python3`、`curl`、`perl` です。`node` または `npm` がない場合、依存脆弱性は「異常なし」ではなく「未検査」として報告されます。Homebrew と composer は、使っている場合に点検の対象になります。Windows には対応していません。
 
@@ -44,7 +44,7 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 6. テスト送信します。
 
    ```bash
-   bash "$HOME/Library/Application Support/repo-health-kit/bin/repo-health.sh" --test-mail
+   /bin/bash "$HOME/Library/Application Support/repo-health-kit/bin/repo-health.sh" --test-mail
    ```
 
 1Password を使う場合は、API キーの代わりに `RH_RESEND_KEY_OP="op://…"` を設定できます。実行時に `op read` で取得し、キーをログや標準出力へ出しません。
@@ -176,6 +176,21 @@ Claude Code に相談するときは、値やシークレットを貼らず、�
 
 > repo-health-latest.md の FAIL と WARN を読み、原因を調べてください。作業中の変更は消さず、修正前に影響範囲を説明してください。brew upgrade や brew uninstall で Mac の部品を変えるときも、先に何を変えるかを説明してください。
 
+## 期限を決めて据え置く
+
+確認済みの WARN / FAIL を一時的に参考へ移すときは、`~/.config/repo-health-kit/allow.tsv` に、タブで区切った3列を書きます。install 時に空の表を作ります。
+
+```tsv
+# 一致させる文（本文の一部）	期限 YYYY-MM-DD	理由
+「local-tools」 — origin 未設定	2026-12-01	手元だけで使うため
+```
+
+例の期限は、利用時に当日から180日以内の日付へ置き換えてください。本文の一部を文字どおり照合するため、リポ名や指摘の種類まで含めると対象を絞れます。文・期限・理由はすべて必須です。期限当日まで参考（据え置き中・期限 …）に移り、要対応の件数と通知から外れます。7日前から参考に「据え置きの期限が近い」と出し、期限切れで要対応に戻します。侵害パッケージと追跡中の鍵の FAIL は据え置けず、表に一致しても FAIL と注記が残ります。利用者の設定にある `vuln-allow.tsv` による脆弱性ごとの据え置きとは別です。
+
+`.env.production` などは、未追跡で gitignore 済みなら参考に出します。追跡中か gitignore されていない場合は「git に入るおそれのある env ファイル」として知らせ、追跡中の鍵は別途 FAIL にします。秘密の値は表示しません。
+
+履歴ログと launchd のログは5MBを超えたら `.1` に回し、1世代だけ残します。同名のリポが複数の点検ルートにあっても、状態はフルパスの短いハッシュで区別します。既存の状態は初回に引き継ぎます。
+
 ## 設定を変える
 
 `~/.config/repo-health-kit/config.sh` を編集します。複数の親ディレクトリや、1日複数回の時刻も指定できます。
@@ -189,7 +204,11 @@ RH_AUTOFIX_PULL=1
 RH_AUTOFIX_CLI=0
 ```
 
-CLI の自動更新は初期状態で無効です。有効にしたときも、npm で入れた CLI は公開から3日以上たった版までしか上げません（0.5.0〜）。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
+CLI の自動更新は初期状態で無効です。有効にしたときも、npm で入れた CLI だけを、公開から3日以上たった版へ更新します。正式な latest 以下で、現在も配布され、非推奨になっていない版を選びます。取得できなければ未検査とします。npm 以外で入れた CLI は自動更新せず、現在版・上げ先・入れた方法に応じた直し方を WARN で案内します。Claude Code の公開日は npm の情報で確認します。サポート中の Node.js LTS 系列から次の LTS への案内は参考に出します。
+
+Homebrew の formula と cask の自動更新には 3 日待ちがありません。
+
+install は、そのときの npm の場所を `RH_NPM_DIR`、手元の clone の場所を `RH_CLONE_DIR` として設定に記録します。無人実行では、存在する fnm の default（`~/.local/share/fnm/aliases/default/bin`、無ければ `~/Library/Application Support/fnm/aliases/default/bin`）、nvm の `~/.nvm/alias/default` が指す版の bin、`RH_NPM_DIR` を PATH に加えます。シェルの初期化ファイルは実行しません。npm が見つからず飛ばした点検は未検査に残します。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
 
 他人から受け取ったフォルダは点検ルートに置かないでください。点検時の git はファイル監視・hook・リポ固有の SSH コマンドを無効にし、composer もプラグインとスクリプトを動かさずに使います。
 
@@ -237,7 +256,7 @@ git pull
 ```
 
 - `install.sh` は、本体と同梱の表（テスト先・最低版など）を新しい版に入れ替え、最後にメールを送らずに一度点検します。
-- 設定ファイル（`~/.config/repo-health-kit/config.sh`）と据え置きの設定（`vuln-allow.tsv`）は上書きしません。
+- 利用者の設定と据え置き表（`allow.tsv`・`vuln-allow.tsv`）は引き継ぎます。`config.sh` の npm と clone の場所だけを記録し直します。
 - 新しい版で増えた設定は、書かなくても初期値で動きます。変えたい項目だけを「[設定を変える](#設定を変える)」を見て書き足してください。
 - 新しい版が出ると、毎朝の点検で WARN としてお知らせします。お知らせが届いたら、この手順で更新してください。
 
@@ -248,7 +267,7 @@ Claude Code に任せる場合は、[PROMPT.md の「新しい版のお知らせ
 メールを送らず手で点検するには、次を実行します。
 
 ```bash
-RH_NOMAIL=1 bash "$HOME/Library/Application Support/repo-health-kit/bin/repo-health.sh"
+RH_NOMAIL=1 /bin/bash "$HOME/Library/Application Support/repo-health-kit/bin/repo-health.sh"
 ```
 
 定期実行だけ止めるには、次を実行します。

@@ -60,3 +60,5 @@ brew:ruby	*	4.0.9	CVE-2026-97229 ほか（Ruby の正規表現の整数あふれ
 brew:ruby@3.4	3.4	3.4.12	CVE-2026-97229 ほか（Ruby の正規表現の整数あふれ・GitLab で悪用＝CISA KEV・外から受け取った文字列を正規表現にする場合・ruby-lang.org 2026-10-23）
 brew:ruby@3.3	3.3	3.3.13	CVE-2026-97229 ほか（Ruby の正規表現の整数あふれ・GitLab で悪用＝CISA KEV・外から受け取った文字列を正規表現にする場合・ruby-lang.org 2026-10-23）
 electron-after	*	2026-10-21	CVE-2026-111497（Electron が抱える Brotli・Chromium／Node）
+claude	EOL	1	サポートが終わった系列（修正版が出ません）
+brew:bind	EOL	9.18	サポートが終わった系列（修正版が出ません）

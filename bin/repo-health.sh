@@ -16,7 +16,41 @@ fatal() {
 }
 
 clean_text() {
-  printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'
+}
+
+# 外から来た名前は、本文の区切りと混ざらないよう引用して表示します。
+quote_name() {
+  local value
+  value="$(clean_text "$1")"
+  python3 -c 'import sys; print("「" + sys.argv[1][:120] + "」", end="")' "$value"
+}
+
+# シェルの初期化を実行せず、既定の Node 環境だけを探します。
+add_node_paths() {
+  local candidate alias version prefix nvm_root="$HOME/.nvm" depth=0
+  candidate="$HOME/.local/share/fnm/aliases/default/bin"
+  [ -d "$candidate" ] || candidate="$HOME/Library/Application Support/fnm/aliases/default/bin"
+  [ ! -d "$candidate" ] || PATH="$PATH:$candidate"
+  alias=default
+  while [ -f "$nvm_root/alias/$alias" ] && [ "$depth" -lt 8 ]; do
+    IFS= read -r alias < "$nvm_root/alias/$alias" || true
+    depth=$((depth + 1))
+  done
+  case "$alias" in
+    v[0-9]*|[0-9]*)
+      prefix="${alias#v}"
+      version="$(find "$nvm_root/versions/node" -mindepth 1 -maxdepth 1 -type d -name "v$prefix*" 2>/dev/null | python3 -c '
+import re, sys
+prefix = sys.argv[1]
+items = [s.strip() for s in sys.stdin if re.search(r"/v[0-9]+(?:\.[0-9]+)*$", s.strip()) and (s.strip().rsplit("/v", 1)[1] == prefix or s.strip().rsplit("/v", 1)[1].startswith(prefix + "."))]
+def key(s): return tuple(map(int, s.rsplit("/v", 1)[1].split(".")))
+print(max(items, key=key) if items else "")' "$prefix")"
+      [ ! -d "$version/bin" ] || PATH="$PATH:$version/bin"
+      ;;
+  esac
+  [ ! -d "${RH_NPM_DIR:-/nonexistent}" ] || PATH="$PATH:$RH_NPM_DIR"
+  export PATH
 }
 
 is_uint() {
@@ -121,6 +155,8 @@ elif [ -z "${RH_SOFTWARE_IGNORE+x}" ]; then
 fi
 [ -z "$RH_ENV_SOFTWARE_SKIP_TOOLS_SET" ] || RH_SOFTWARE_SKIP_TOOLS="$RH_ENV_SOFTWARE_SKIP_TOOLS_VALUE"
 
+add_node_paths
+
 case "$RH_MAIL_METHOD" in resend|none) ;; *) fatal "RH_MAIL_METHOD は resend または none を指定してください";; esac
 case "$RH_SECURITY_ONLY" in 0|1) ;; *) fatal "RH_SECURITY_ONLY は 0 または 1 を指定してください";; esac
 is_uint "$RH_AUTOFIX_PULL" || fatal "RH_AUTOFIX_PULL は0以上の整数で指定してください"
@@ -155,6 +191,7 @@ LOG_FILE="$LOG_DIR/repo-health.log"
 REPORT="$LOG_DIR/repo-health-latest.md"
 DENYLIST="${RH_DENYLIST:-$KIT_DIR/config/pkg-denylist.tsv}"
 DENY_SCANNER="${RH_DENY_SCANNER:-$SCRIPT_DIR/pkg-denylist-scan.py}"
+ALLOW_FILE="${RH_ALLOW_FILE:-$HOME/.config/repo-health-kit/allow.tsv}"
 VULN_ALLOW_FILE="${RH_VULN_ALLOW_FILE:-$HOME/.config/repo-health-kit/vuln-allow.tsv}"
 SECURITY_PACKAGES="${RH_SECURITY_PACKAGES:-$KIT_DIR/config/security-packages.txt}"
 SECURITY_MINIMUMS="${RH_SECURITY_MINIMUMS:-$KIT_DIR/config/security-minimums.tsv}"
@@ -247,12 +284,89 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
+rotate_log() {
+  local path="$1" size mode="${2:-move}"
+  [ -f "$path" ] || return 0
+  size="$(wc -c < "$path" | tr -d ' ')"
+  [ "$size" -gt 5242880 ] || return 0
+  if [ "$mode" = truncate ]; then
+    cp -p "$path" "$path.1" && : > "$path"
+  else
+    mv -f "$path" "$path.1"
+  fi
+}
+rotate_log "$LOG_FILE"
+rotate_log "$LOG_DIR/repo-health-launchd.log" truncate
+
 declare -a FAILURES WARNINGS AUTOFIXED WORKING SYNC_WAIT CLI_UPDATES SOFTWARE_UPDATES NOTES DETAILS
 FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); SOFTWARE_UPDATES=(); NOTES=(); DETAILS=()
 
 add_failure() { FAILURES[${#FAILURES[@]}]="$(clean_text "$*")"; }
 add_warning() { WARNINGS[${#WARNINGS[@]}]="$(clean_text "$*")"; }
+add_protected_failure() {
+  add_failure "$@"
+  printf '%s\n' "$(clean_text "$*")" >> "$TMP_DIR/protected-failures"
+}
 add_detail() { DETAILS[${#DETAILS[@]}]="$(clean_text "$*")"; }
+
+# 全ての検査が終わったあとに適用し、据え置き中は件数・通知から外します。
+apply_allowances() {
+  local status pattern expiry reason remaining item level matched protected
+  local -a kept
+  [ -f "$ALLOW_FILE" ] || return 0
+  check_config_safety "$ALLOW_FILE"
+  python3 - "$ALLOW_FILE" "${RH_TODAY:-$(TZ=Asia/Tokyo date '+%Y-%m-%d')}" > "$TMP_DIR/allow-valid.tsv" <<'PY_ALLOW'
+from datetime import date
+import sys
+from pathlib import Path
+today = date.fromisoformat(sys.argv[2])
+for number, line in enumerate(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1):
+    if not line.strip() or line.startswith("#"):
+        continue
+    parts = line.split("\t")
+    try:
+        if len(parts) != 3 or not parts[0].strip() or not parts[2].strip():
+            raise ValueError()
+        expires = date.fromisoformat(parts[1])
+        if expires.isoformat() != parts[1] or (expires - today).days > 180:
+            raise ValueError()
+    except ValueError:
+        print(f"INVALID\t{number}\t-\t-\t-")
+        continue
+    print("\t".join(("VALID", *parts, str((expires - today).days))))
+PY_ALLOW
+  while IFS=$'\t' read -r status pattern expiry reason remaining; do
+    [ "$status" != INVALID ] || { NOTES[${#NOTES[@]}]="据え置き表の ${pattern} 行目は無効です（文・期限 YYYY-MM-DD・理由が必要です。期限は最長 180 日）"; }
+  done < "$TMP_DIR/allow-valid.tsv"
+  for level in FAIL WARN; do
+    kept=()
+    if [ "$level" = FAIL ]; then
+      printf '%s\0' "${FAILURES[@]+"${FAILURES[@]}"}" > "$TMP_DIR/allow-items"
+    else
+      printf '%s\0' "${WARNINGS[@]+"${WARNINGS[@]}"}" > "$TMP_DIR/allow-items"
+    fi
+    while IFS= read -r -d '' item; do
+      [ -n "$item" ] || continue
+      matched=0; protected=0
+      if [ "$level" = FAIL ] && [ -f "$TMP_DIR/protected-failures" ] && grep -Fqx -- "$item" "$TMP_DIR/protected-failures"; then protected=1; fi
+      while IFS=$'\t' read -r status pattern expiry reason remaining; do
+        [ "$status" = VALID ] || continue
+        case "$item" in *"$pattern"*) ;; *) continue;; esac
+        if [ "$protected" = 1 ]; then
+          NOTES[${#NOTES[@]}]="据え置き不可（侵害パッケージ・追跡中の鍵）: $item"
+          break
+        fi
+        [ "$remaining" -ge 0 ] || continue
+        NOTES[${#NOTES[@]}]="参考（据え置き中・期限 ${expiry}）${level} ${item}（理由: $(clean_text "$reason")）"
+        if [ "$remaining" -le 7 ]; then NOTES[${#NOTES[@]}]="据え置きの期限が近い: ${expiry} — $item"; fi
+        matched=1
+        break
+      done < "$TMP_DIR/allow-valid.tsv"
+      [ "$matched" = 1 ] || kept[${#kept[@]}]="$item"
+    done < "$TMP_DIR/allow-items"
+    if [ "$level" = FAIL ]; then FAILURES=("${kept[@]+"${kept[@]}"}"); else WARNINGS=("${kept[@]+"${kept[@]}"}"); fi
+  done
+}
 
 # shellcheck disable=SC2329  # process substitution と timeout 経由でも使います。
 rh_git() {
@@ -274,6 +388,27 @@ streak_key() {
   base="$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')"
   checksum="$(printf '%s' "$1" | cksum | awk '{print $1}')"
   printf '%s-%s' "$base" "$checksum"
+}
+
+repo_state_key() {
+  local repo="$1" base hash prefix old new marker
+  base="$(basename -- "$repo")"
+  hash="$(printf '%s' "$repo" | cksum | awk '{print $1}')"
+  REPO_STATE_KEY="$(printf '%s' "$base" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_' | cut -c 1-100)-$hash"
+  marker="$STATE_DIR/$(streak_key "migrated-$REPO_STATE_KEY").state"
+  [ ! -f "$marker" ] || return 0
+  for prefix in fetch dirty stale size; do
+    if [ "$prefix" = size ]; then
+      old="$STATE_DIR/$(streak_key "$prefix-$base").size"
+      new="$STATE_DIR/$(streak_key "$prefix-$REPO_STATE_KEY").size"
+    else
+      old="$(streak_file "$prefix-$base")"
+      new="$(streak_file "$prefix-$REPO_STATE_KEY")"
+    fi
+    [ ! -f "$old" ] || [ -f "$new" ] || cp -p "$old" "$new"
+  done
+  : > "$marker"
+  chmod 600 "$marker"
 }
 
 streak_file() {
@@ -408,30 +543,30 @@ for kind, source in (("tracked", sys.argv[2]), ("untracked", sys.argv[3])):
             if any(role(m.group()) == 'service_role' for m in jwt.finditer(text)):
                 hits.add((n, 'Supabase service_role JWT'))
         for n, label in sorted(hits):
-            print(f'{kind}\t{rel}\t{n}\t{label}')
+            sys.stdout.write(f'{kind}\0{rel}\0{n}\0{label}\0')
 PY
   then
     add_failure "$repo_name — 平文シークレットの検査が異常終了しました"
     return
   fi
-  while IFS=$'\t' read -r kind rel line secret_type; do
+  while IFS= read -r -d '' kind && IFS= read -r -d '' rel && IFS= read -r -d '' line && IFS= read -r -d '' secret_type; do
     if [ "$secret_type" = 'tracked .env file' ]; then
-      add_failure "$repo_name — .env ファイルが追跡中: ${rel}:${line}（${secret_type}）"
+      add_failure "$repo_name — .env ファイルが追跡中: $(quote_name "$rel"):${line}（${secret_type}）"
     elif [ "$kind" = tracked ]; then
-      add_failure "$repo_name — 平文シークレットが commit 済み: ${rel}:${line}（${secret_type}）"
+      add_protected_failure "$repo_name — 平文シークレットが commit 済み: $(quote_name "$rel"):${line}（${secret_type}）"
     else
-      add_failure "$repo_name — 平文シークレットが未追跡かつ gitignore 外: ${rel}:${line}（${secret_type}）"
+      add_failure "$repo_name — 平文シークレットが未追跡かつ gitignore 外: $(quote_name "$rel"):${line}（${secret_type}）"
     fi
   done < "$output"
 }
 
 scan_nonstandard_env() {
-  local repo="$1" repo_name="$2" file keys modified now days
+  local repo="$1" repo_name="$2" file keys modified now days ignored
   for file in "$repo"/.env.*; do
     [ -f "$file" ] || continue
-    # 追跡中は鍵の点検で扱い、未追跡かつ無視済みのローカル設定は除外します。
-    rh_git -C "$repo" ls-files --error-unmatch -- "${file#"$repo"/}" >/dev/null 2>&1 && continue
-    rh_git -C "$repo" check-ignore -q -- "$file" && continue
+    ignored=0
+    if ! rh_git -C "$repo" ls-files --error-unmatch -- "${file#"$repo"/}" >/dev/null 2>&1 \
+      && rh_git -C "$repo" check-ignore -q -- "$file"; then ignored=1; fi
     case "${file##*/}" in .env.local|.env.example|.env.sample|.env.tpl) continue;; esac
     keys="$(LC_ALL=C grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=.+' "$file" 2>/dev/null || true)"
     is_uint "$keys" || keys=0
@@ -440,7 +575,11 @@ scan_nonstandard_env() {
     now="$(date '+%s')"
     is_uint "$modified" || modified=0
     days=$(( (now - modified) / 86400 ))
-    add_warning "$repo_name — 運用フロー外の env ファイル $(basename -- "$file")（${keys}キー・${days}日前）"
+    if [ "$ignored" = 1 ]; then
+      NOTES[${#NOTES[@]}]="$repo_name — gitignore 済みの env ファイル $(quote_name "${file##*/}")"
+    else
+      add_warning "$repo_name — git に入るおそれのある env ファイル $(quote_name "${file##*/}")（${keys}キー・${days}日前）"
+    fi
   done
 }
 
@@ -605,7 +744,7 @@ audit_manifest() {
   local -a audit_args
   manifest_dir="$(dirname -- "$manifest")"
   rel="${manifest_dir#"$repo"/}"
-  if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$rel"; fi
+  if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$(quote_name "$rel")"; fi
   if [ -f "$manifest_dir/package-lock.json" ] || [ -f "$manifest_dir/npm-shrinkwrap.json" ]; then
     audit_args=(audit --omit=dev --package-lock-only --json --fetch-timeout=60000 --fetch-retries=0)
   elif [ -f "$manifest_dir/pnpm-lock.yaml" ]; then
@@ -629,6 +768,7 @@ audit_manifest() {
   if ! command -v "$tool" >/dev/null 2>&1; then
     if [ "$tool" = npm ]; then
       add_warning "$label — npm audit 実行不能（npm 不在）"
+      NOTES[${#NOTES[@]}]="$label — npm 不在のため依存脆弱性は未検査"
     else
       NOTES[${#NOTES[@]}]="$label — この lock は npm audit では見られません（${tool} を入れると見られます）"
     fi
@@ -652,7 +792,7 @@ audit_manifest() {
     add_warning "$label — $tool audit 実行不能（応答なし）"
     return
   fi
-  counts="$(audit_counts "$output" "$tool" "$repo_name" "$audit_rc")"
+  counts="$(audit_counts "$output" "$tool" "$(basename -- "$repo")" "$audit_rc")"
   if [ -z "$counts" ]; then
     add_warning "$label — $tool audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
     return
@@ -664,7 +804,7 @@ audit_composer_lock() {
   local repo="$1" repo_name="$2" lock="$3" manifest_dir rel label output counts composer_path
   manifest_dir="$(dirname -- "$lock")"
   rel="${manifest_dir#"$repo"/}"
-  if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$rel"; fi
+  if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$(quote_name "$rel")"; fi
   if [ "$RH_SKIP_AUDIT" = 1 ]; then
     add_detail "$label — composer audit は RH_SKIP_AUDIT=1 のため未検査"
     return
@@ -676,7 +816,7 @@ audit_composer_lock() {
   fi
   output="$TMP_DIR/composer-audit-$(streak_key "$lock").json"
   (cd "$manifest_dir" && run_timeout 120 "$composer_path" --no-plugins --no-scripts audit --locked --no-dev --format=json --no-interaction > "$output" 2>/dev/null) || true
-  counts="$(audit_counts "$output" composer "$repo_name")"
+  counts="$(audit_counts "$output" composer "$(basename -- "$repo")")"
   if [ -z "$counts" ]; then
     add_warning "$label — composer audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
     return
@@ -708,7 +848,7 @@ scan_manifests() {
 }
 
 scan_denylist() {
-  local repo="$1" repo_name="$2" output rc line prefix hit_repo lock package reason
+  local repo="$1" repo_name="$2" output rc line prefix _hit_repo lock package reason
   output="$TMP_DIR/deny-$(streak_key "$repo").txt"
   if [ ! -f "$DENY_SCANNER" ] || [ ! -f "$DENYLIST" ]; then
     add_failure "$repo_name — 侵害パッケージ照合が動いていません（同梱ファイル不足）"
@@ -717,12 +857,12 @@ scan_denylist() {
   run_timeout 60 python3 "$DENY_SCANNER" --repo "$repo" --name "$repo_name" --denylist "$DENYLIST" > "$output" 2>/dev/null
   rc=$?
   while IFS= read -r line; do
-    IFS='|' read -r prefix hit_repo lock package reason <<EOF
+    IFS='|' read -r prefix _hit_repo lock package reason <<EOF
 $line
 EOF
     case "$prefix" in
-      DENY) add_failure "$hit_repo — 侵害パッケージが入っています: ${package}（${reason}・${lock}）" ;;
-      DENYWARN) add_warning "$repo_name — $lock は未照合（${package}）" ;;
+      DENY) add_protected_failure "$repo_name — 侵害パッケージが入っています: ${package}（${reason}・$(quote_name "$lock")）" ;;
+      DENYWARN) add_warning "$repo_name — $(quote_name "$lock") は未照合（${package}）" ;;
       DENYSKIP) add_failure "$repo_name — 侵害パッケージ照合が動いていません: $lock" ;;
     esac
   done < "$output"
@@ -732,7 +872,7 @@ EOF
 }
 
 scan_actions_denylist() {
-  local repo="$1" repo_name="$2" output rc line prefix workflow action reason
+  local repo="$1" repo_name="$2" output rc prefix workflow action reason
   if [ ! -f "$ACTIONS_DENYLIST" ]; then
     add_failure "$repo_name — GitHub Actions 照合が動いていません（同梱リスト不足）"
     return
@@ -754,7 +894,7 @@ for raw in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines():
     parts = line.split("\t")
     deny[parts[0].strip().lower()] = parts[1].strip() if len(parts) > 1 else "理由未記入"
 if not deny:
-    print("ACTIONSKIP|-|-|照合リストが空です")
+    sys.stdout.write("ACTIONSKIP\0-\0-\0照合リストが空です\0")
     raise SystemExit(2)
 
 result = subprocess.run(
@@ -795,15 +935,12 @@ for raw in result.stdout.split(b"\0"):
         if reason is None or (rel, action) in seen:
             continue
         seen.add((rel, action))
-        print("|".join(("ACTION", rel.replace("|", "_"), action.replace("|", "_"), reason.replace("|", "_"))))
+        sys.stdout.write("\0".join(("ACTION", rel, action, reason)) + "\0")
 PY
   rc=$?
-  while IFS= read -r line; do
-    IFS='|' read -r prefix workflow action reason <<EOF
-$line
-EOF
+  while IFS= read -r -d '' prefix && IFS= read -r -d '' workflow && IFS= read -r -d '' action && IFS= read -r -d '' reason; do
     case "$prefix" in
-      ACTION) add_failure "$repo_name — 侵害された GitHub Action（${action}）を使っています。workflow から外し、そのリポの secret を入れ替えてください（${reason}・${workflow}）" ;;
+      ACTION) add_failure "$repo_name — 侵害された GitHub Action（${action}）を使っています。workflow から外し、そのリポの secret を入れ替えてください（${reason}・$(quote_name "$workflow")）" ;;
       ACTIONSKIP) add_failure "$repo_name — GitHub Actions 照合が動いていません: ${reason}" ;;
     esac
   done < "$output"
@@ -821,7 +958,7 @@ check_git_size() {
   if [ "$mb" -gt "$RH_GIT_MB_WARN" ]; then
     add_warning "$repo_name — .git ${mb}MB（閾値 ${RH_GIT_MB_WARN}MB 超）"
   fi
-  size_file="$STATE_DIR/$(streak_key "size-$repo_name").size"
+  size_file="$STATE_DIR/$(streak_key "size-$REPO_STATE_KEY").size"
   if [ -f "$size_file" ]; then
     previous="$(sed -n '1p' "$size_file" 2>/dev/null)"
     if is_uint "$previous" && [ "$mb" -gt "$previous" ]; then
@@ -866,7 +1003,8 @@ check_repo() {
   local repo="$1" repo_name fetch branch state rebase_merge rebase_apply merge_head
   local ahead behind dirty stash fetch_days dirty_days stale_days upstream base unmerged
   local ff_ok git_status_count origin_url
-  repo_name="$(clean_text "$(basename -- "$repo")")"
+  repo_name="$(quote_name "$(basename -- "$repo")")"
+  repo_state_key "$repo"
 
   if ! rh_git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     add_failure "$repo_name — git repo 破損（rev-parse 不能）"
@@ -885,10 +1023,10 @@ check_repo() {
       add_detail "$repo_name — fetch は RH_SKIP_FETCH=1 のため未検査"
     elif run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
       || { sleep 3; run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
-      streak_reset "fetch-$repo_name"
+      streak_reset "fetch-$REPO_STATE_KEY"
     else
       fetch="NG"
-      fetch_days="$(streak_bump "fetch-$repo_name")"
+      fetch_days="$(streak_bump "fetch-$REPO_STATE_KEY")"
       if [ "$fetch_days" -ge "$RH_FETCH_FAIL_DAYS" ]; then
         add_failure "$repo_name — fetch 失敗が${fetch_days}日連続（認証または remote を確認してください）"
       else
@@ -918,7 +1056,7 @@ check_repo() {
     else
       upstream=""
       ahead="NOUP"; behind="NOUP"
-      add_warning "$repo_name — upstream 未設定（${branch}）"
+      add_warning "$repo_name — upstream 未設定（$(quote_name "$branch")）"
     fi
   fi
   if is_uint "$ahead" && [ "$ahead" -gt 0 ]; then add_warning "$repo_name — 未push $ahead 件"; fi
@@ -952,14 +1090,14 @@ check_repo() {
   fi
 
   if [ "$dirty" -gt 0 ]; then
-    dirty_days="$(streak_bump "dirty-$repo_name")"
+    dirty_days="$(streak_bump "dirty-$REPO_STATE_KEY")"
     if [ "$dirty_days" -ge "$RH_DIRTY_DAYS_WARN" ]; then
       add_warning "$repo_name — dirty ${dirty}件が${dirty_days}日連続（コミットまたは退避を確認してください）"
     else
       WORKING[${#WORKING[@]}]="$repo_name — dirty ${dirty}件（${dirty_days}日目・作業中）"
     fi
   else
-    streak_reset "dirty-$repo_name"
+    streak_reset "dirty-$REPO_STATE_KEY"
   fi
   [ "$stash" -gt 0 ] && add_warning "$repo_name — stash $stash 件残置"
 
@@ -974,12 +1112,12 @@ check_repo() {
   fi
 
   if is_uint "$behind" && [ "$behind" -ge "$RH_STALE_BEHIND_THRESHOLD" ] && [ "$dirty" -gt 0 ]; then
-    stale_days="$(streak_bump "stale-$repo_name")"
+    stale_days="$(streak_bump "stale-$REPO_STATE_KEY")"
     if [ "$stale_days" -ge "$RH_STALE_DAYS_FAIL" ]; then
       add_failure "$repo_name — ${stale_days}日連続で behind>=${RH_STALE_BEHIND_THRESHOLD} かつ dirty"
     fi
   else
-    streak_reset "stale-$repo_name"
+    streak_reset "stale-$REPO_STATE_KEY"
   fi
 
   check_git_size "$repo" "$repo_name"
@@ -988,12 +1126,13 @@ check_repo() {
   scan_manifests "$repo" "$repo_name"
   scan_denylist "$repo" "$repo_name"
   scan_actions_denylist "$repo" "$repo_name"
-  add_detail "$repo_name — fetch=$fetch branch=$branch ahead=$ahead behind=$behind dirty=$dirty stash=$stash state=$state"
+  add_detail "$repo_name — fetch=$fetch branch=$(quote_name "$branch") ahead=$ahead behind=$behind dirty=$dirty stash=$stash state=$state"
 }
 
 check_repo_security_only() {
   local repo="$1" repo_name
-  repo_name="$(clean_text "$(basename -- "$repo")")"
+  repo_name="$(quote_name "$(basename -- "$repo")")"
+  repo_state_key "$repo"
   scan_denylist "$repo" "$repo_name"
   scan_actions_denylist "$repo" "$repo_name"
 }
@@ -1035,17 +1174,15 @@ EOF
 }
 
 npm_release_info() {
-  local package="$1" current="$2" time_json key latest_tag
+  local package="$1" current="$2" time_json key
   NPM_LATEST=""; NPM_TARGET=""; NPM_LATEST_DATE=""; NPM_LATEST_WAIT=0
   key="$(streak_key "npm-time-$package")"
   time_json="$TMP_DIR/${key}.json"
-  if ! run_timeout 40 npm view "$package" time --json > "$time_json" 2>/dev/null; then
+  if ! run_timeout 40 npm view "$package@*" time dist-tags versions deprecated version --json > "$time_json" 2>/dev/null; then
     return 1
   fi
-  # latest タグより上の版（next 止まりで見送られた版など）は上げ先にしない
-  latest_tag="$(run_timeout 40 npm view "$package" dist-tags.latest 2>/dev/null || true)"
   IFS=$'\t' read -r NPM_LATEST NPM_TARGET NPM_LATEST_DATE NPM_LATEST_WAIT < <(
-    python3 -I - "$time_json" "$current" "$latest_tag" <<'PY'
+    python3 -I - "$time_json" "$current" <<'PY'
 import json
 import re
 import sys
@@ -1076,20 +1213,40 @@ def published_at(value):
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+# @* の各版のメタデータを一度で取得し、古い版の非推奨指定も拾います。
+if isinstance(data, list):
+    rows = data
+    if not rows or not all(isinstance(row, dict) for row in rows):
+        raise SystemExit(1)
+    data = dict(rows[-1])
+    data["deprecated"] = {row.get("version"): row.get("deprecated") for row in rows if row.get("deprecated")}
 if not isinstance(data, dict):
     raise SystemExit(1)
 current_key = version_key(sys.argv[2])
 if current_key is None:
     raise SystemExit(1)
 releases = []
-for version, raw_time in data.items():
+times = data.get("time")
+versions = data.get("versions")
+tags = data.get("dist-tags")
+if not isinstance(times, dict) or not isinstance(versions, list) or not isinstance(tags, dict):
+    raise SystemExit(1)
+cap_key = version_key(tags.get("latest"))
+if cap_key is None or tags.get("latest") not in versions:
+    raise SystemExit(1)
+# npm が package 全体の deprecated を返した場合は、候補全体を見送ります。
+# 版ごとの非推奨情報がある場合も同じ問い合わせ結果から除きます。
+deprecated = data.get("deprecated", {})
+if isinstance(deprecated, str) and deprecated.strip():
+    raise SystemExit(1)
+for version, raw_time in times.items():
+    if version not in versions or (isinstance(deprecated, dict) and deprecated.get(version)):
+        continue
     key = version_key(version)
     moment = published_at(raw_time)
     if key is not None and moment is not None:
         releases.append((key, version.lstrip("v"), moment))
-cap_key = version_key(sys.argv[3].strip()) if len(sys.argv) > 3 else None
-if cap_key is not None and any(item[0] == cap_key for item in releases):
-    releases = [item for item in releases if item[0] <= cap_key]
+releases = [item for item in releases if item[0] <= cap_key]
 if not releases:
     raise SystemExit(1)
 latest_key, latest, latest_time = max(releases, key=lambda item: item[0])
@@ -1115,39 +1272,37 @@ npm_package_for_cli() {
   esac
 }
 
+cli_is_npm() {
+  local real
+  real="$(real_path_of "$2")"
+  case "$real" in */node_modules/*) npm_package_for_cli "$1" >/dev/null;; *) return 1;; esac
+}
+
+cli_remedy() {
+  local tool="$1" path="$2" target="$3" real formula
+  real="$(real_path_of "$path")"
+  if cli_is_npm "$tool" "$path"; then
+    printf 'npm install -g %s@%s' "$(npm_package_for_cli "$tool")" "$target"
+    return
+  fi
+  case "$tool:$path:$real" in
+    claude:*:*/.local/*|claude:*/.local/bin/claude:*) printf 'claude update で更新（公開日を確認してください）';;
+    *:/opt/homebrew/*:*|*:/usr/local/*:*|*:*:*/Cellar/*|*:*:*/Caskroom/*)
+      formula="$tool"
+      case "$tool" in claude) formula=claude-code;; op) formula=1password-cli;; esac
+      printf 'brew upgrade %s（入る版と公開日を確認してください）' "$formula";;
+    *) printf '入れた方法で %s へ更新してください' "$target";;
+  esac
+}
+
 update_cli() {
-  local tool="$1" path="$2" target="$3" real package formula
-  real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null || printf '%s' "$path")"
-  case "$tool" in
-    claude) package='@anthropic-ai/claude-code'; formula='claude-code' ;;
-    codex) package='@openai/codex'; formula='codex' ;;
-    npm) package='npm'; formula='' ;;
-    vercel|supabase) package="$tool"; formula="$tool" ;;
-    node) package=''; formula='node' ;;
-    gh) package=''; formula='gh' ;;
-    op) package=''; formula='1password-cli' ;;
-    *) return 1 ;;
-  esac
-  case "$real$path" in
-    */node_modules/*)
-      [ -n "$package" ] || return 1
-      [ -n "$target" ] || return 1
-      run_timeout 600 npm install -g "${package}@${target}" >/dev/null 2>&1
-      ;;
-    */.local/bin/claude)
-      run_timeout 600 "$path" update >/dev/null 2>&1
-      ;;
-    /opt/homebrew/bin/*|/usr/local/bin/*)
-      [ -n "$formula" ] && command -v brew >/dev/null 2>&1 || return 1
-      run_timeout 600 brew upgrade "$formula" >/dev/null 2>&1
-      ;;
-    *) return 1 ;;
-  esac
+  cli_is_npm "$1" "$2" && [ -n "$3" ] || return 1
+  run_timeout 600 npm install -g "$(npm_package_for_cli "$1")@$3" >/dev/null 2>&1
 }
 
 check_cli_tools() {
   local tool path current latest target duplicate duplicate_version current_major latest_major
-  local package wait_note
+  local package wait_note remedy
   if [ "$RH_SKIP_CLI" = "1" ]; then
     NOTES[${#NOTES[@]}]="CLI 更新確認は RH_SKIP_CLI=1 のため未検査"
     return
@@ -1166,6 +1321,10 @@ check_cli_tools() {
       fi
     done < <(type -aP "$tool" 2>/dev/null | LC_ALL=C sort -u)
     target=""; wait_note=""
+    if npm_package_for_cli "$tool" >/dev/null && ! command -v npm >/dev/null 2>&1; then
+      NOTES[${#NOTES[@]}]="$tool — npm 不在のため公開日・更新先は未検査"
+      continue
+    fi
     if package="$(npm_package_for_cli "$tool" 2>/dev/null)"; then
       if npm_release_info "$package" "$current"; then
         latest="$NPM_LATEST"
@@ -1194,11 +1353,24 @@ check_cli_tools() {
         continue
       fi
       current_major="${current%%.*}"; latest_major="${target%%.*}"
+      if [ "$tool" = node ] && [ -f "$SECURITY_MINIMUMS" ]; then
+        lookup_minimum_row node "$current"
+        if [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != EOL ]; then
+          CLI_UPDATES[${#CLI_UPDATES[@]}]="node — サポート中の LTS 系列 $current → $target"
+          continue
+        fi
+      fi
+      remedy="$(cli_remedy "$tool" "$path" "$target")"
+      if ! cli_is_npm "$tool" "$path"; then
+        add_warning "$tool $current → ${target}（${remedy}）${wait_note}"
+        if [ "$tool" = claude ] && [ "$latest_major" -gt "$current_major" ]; then real_path_of "$path" >> "$TMP_DIR/cli-major-warned.claude"; fi
+        continue
+      fi
       if [ "$latest_major" -gt "$current_major" ]; then
         if [ "$RH_AUTOFIX_CLI" = "1" ] && update_cli "$tool" "$path" "$target"; then
           AUTOFIXED[${#AUTOFIXED[@]}]="$tool — メジャー版遅れ $current → $target を自動更新"
         else
-          add_warning "$tool — メジャー版が遅れています $current → $target${wait_note}"
+          add_warning "$tool — メジャー版が遅れています $current → ${target}（${remedy}）${wait_note}"
           [ "$tool" != "claude" ] || real_path_of "$path" >> "$TMP_DIR/cli-major-warned.claude"
         fi
       else
@@ -1220,7 +1392,7 @@ security_detail() {
 lookup_minimum_row() {
   local component="$1" version="$2" major rest minor series level
   local row_component row_series row_minimum row_reason
-  MIN_ROW_MINIMUM=""; MIN_ROW_REASON=""; MIN_ROW_EOL_THRESHOLD=""; MIN_ROW_EOL_REASON=""
+  MIN_ROW_OLDEST=""; MIN_ROW_MINIMUM=""; MIN_ROW_REASON=""; MIN_ROW_EOL_THRESHOLD=""; MIN_ROW_EOL_REASON=""
   major="${version%%.*}"
   series="$major"
   case "$version" in
@@ -1230,6 +1402,10 @@ lookup_minimum_row() {
   while IFS=$'\t' read -r row_component row_series row_minimum row_reason; do
     case "$row_component" in ''|\#*) continue;; esac
     [ "$row_component" = "$component" ] || continue
+    case "$row_series" in
+      [0-9]*)
+        if [ -z "$MIN_ROW_OLDEST" ] || version_less_than "$row_series" "$MIN_ROW_OLDEST"; then MIN_ROW_OLDEST="$row_series"; fi;;
+    esac
     if [ "$row_series" = "EOL" ]; then
       MIN_ROW_EOL_THRESHOLD="$row_minimum"; MIN_ROW_EOL_REASON="$row_reason"
     elif [ "$row_series" = "$series" ]; then
@@ -1240,6 +1416,14 @@ lookup_minimum_row() {
       MIN_ROW_MINIMUM="$row_minimum"; MIN_ROW_REASON="$row_reason"; level=1
     fi
   done < "$SECURITY_MINIMUMS"
+}
+
+warn_old_series() {
+  if [ -z "$MIN_ROW_MINIMUM" ] && [ -n "$MIN_ROW_OLDEST" ] && version_less_than "$2" "$MIN_ROW_OLDEST"; then
+    add_warning "$1 $2 — 古い系列（表の最低系列 ${MIN_ROW_OLDEST} より前）。サポート中の系列へ更新してください"
+    return 0
+  fi
+  return 1
 }
 
 # 文字列の先頭にある数字の版（1〜4 桁）だけを取り出します。取れなければ何も出しません。
@@ -1269,6 +1453,7 @@ check_macos_minimum() {
     return
   fi
   lookup_minimum_row macos "$version"
+  warn_old_series macOS "$version" && return
   if [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != "EOL" ]; then
     if version_less_than "$version" "$MIN_ROW_MINIMUM"; then
       add_warning "macOS ${version} は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。ソフトウェアアップデートで更新してください"
@@ -1311,19 +1496,20 @@ check_claude_minimum() {
     printf '%s\n' "$real" >> "$seen_real"
     version="$(run_timeout 20 "$raw" --version 2>/dev/null | head -1 | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     if [ -z "$version" ]; then
-      NOTES[${#NOTES[@]}]="Claude Code（${raw}）— 版を判定できず未検査"
+      NOTES[${#NOTES[@]}]="Claude Code（$(quote_name "$raw")）— 版を判定できず未検査"
       continue
     fi
     lookup_minimum_row claude "$version"
+    warn_old_series "Claude Code" "$version" && continue
     if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
-      security_detail "Claude Code ${version}（${raw}）— この系列は最低版リストに未掲載"
+      security_detail "Claude Code ${version}（$(quote_name "$raw")）— この系列は最低版リストに未掲載"
     elif ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
-      security_detail "Claude Code ${version}（${raw}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+      security_detail "Claude Code ${version}（$(quote_name "$raw")）— 最低版 ${MIN_ROW_MINIMUM} 以上"
     elif [ -f "$cli_marker" ] && LC_ALL=C grep -Fqx "$real" "$cli_marker" 2>/dev/null; then
       # CLI の更新確認がすでに「メジャー版が遅れています」の WARN にしている。同じ版の話を 2 度 WARN にしない
-      security_detail "Claude Code ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）— CLI の更新確認の WARN と同じ話のため、WARN は 1 件にまとめています"
+      security_detail "Claude Code ${version}（$(quote_name "$raw")）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）— CLI の更新確認の WARN と同じ話のため、WARN は 1 件にまとめています"
     else
-      add_warning "Claude Code ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。claude update で更新してください（npm で入れた場合は npm install -g @anthropic-ai/claude-code@latest）"
+      add_warning "Claude Code ${version}（$(quote_name "$raw")）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。claude update で更新してください（npm で入れた場合は npm install -g @anthropic-ai/claude-code@latest）"
     fi
   done < "$ordered"
 }
@@ -1355,16 +1541,17 @@ check_bun_minimum() {
     printf '%s\n' "$real" >> "$seen_real"
     version="$(run_timeout 20 "$raw" --version 2>/dev/null | head -1 | LC_ALL=C grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     if [ -z "$version" ]; then
-      NOTES[${#NOTES[@]}]="Bun（${raw}）— 版を判定できず未検査"
+      NOTES[${#NOTES[@]}]="Bun（$(quote_name "$raw")）— 版を判定できず未検査"
       continue
     fi
     lookup_minimum_row bun "$version"
+    warn_old_series "Bun" "$version" && continue
     if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
-      security_detail "Bun ${version}（${raw}）— この系列は最低版リストに未掲載"
+      security_detail "Bun ${version}（$(quote_name "$raw")）— この系列は最低版リストに未掲載"
       continue
     fi
     if ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
-      security_detail "Bun ${version}（${raw}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+      security_detail "Bun ${version}（$(quote_name "$raw")）— 最低版 ${MIN_ROW_MINIMUM} 以上"
       continue
     fi
     remedy="入れた方法で更新してください"
@@ -1372,7 +1559,7 @@ check_bun_minimum() {
       "$HOME/.bun/bin/bun":*|*:"$HOME/.bun/bin/bun") remedy="bun upgrade で更新してください" ;;
       *:*/Cellar/bun/*|*/Cellar/bun/*:*) remedy="brew upgrade bun で更新してください" ;;
     esac
-    add_warning "Bun ${version}（${raw}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+    add_warning "Bun ${version}（$(quote_name "$raw")）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
   done < "$ordered"
 }
 
@@ -1394,15 +1581,21 @@ EOF
   return 0
 }
 
+plist_value() {
+  local value
+  if value="$(plutil -extract "$2" raw -o - "$1" 2>/dev/null)" && [ -n "$value" ]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  value="$(/usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null)" || return 1
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
 check_app_minimums() {
-  local plutil_cmd apps app plist bundle component raw_version version label remedy running
+  local apps app plist bundle component raw_version version label remedy running read_count=0
   if [ ! -f "$SECURITY_MINIMUMS" ]; then
     NOTES[${#NOTES[@]}]="アプリの最低版は同梱リスト不足のため未検査"
-    return
-  fi
-  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
-  if [ -z "$plutil_cmd" ]; then
-    NOTES[${#NOTES[@]}]="アプリの最低版は plutil が無いため未検査"
     return
   fi
   apps="$TMP_DIR/app-bundles.list"
@@ -1411,32 +1604,34 @@ check_app_minimums() {
     plist="$app/Contents/Info.plist"
     [ -f "$plist" ] || continue
     # アプリは起動せず、Info.plist だけを読む
-    bundle="$("$plutil_cmd" -extract CFBundleIdentifier raw -o - "$plist" 2>/dev/null || true)"
+    bundle="$(plist_value "$plist" CFBundleIdentifier 2>/dev/null || true)"
     [ -n "$bundle" ] || continue
+    read_count=$((read_count + 1))
     component="app:${bundle}"
     awk -F '\t' -v component="$component" '$1 == component { found=1 } END { exit !found }' "$SECURITY_MINIMUMS" || continue
-    raw_version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+    raw_version="$(plist_value "$plist" CFBundleShortVersionString 2>/dev/null || true)"
     version="$(leading_version "$raw_version")"
     if [ -z "$version" ]; then
-      raw_version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+      raw_version="$(plist_value "$plist" CFBundleVersion 2>/dev/null || true)"
       version="$(leading_version "$raw_version")"
     fi
     if [ -z "$version" ]; then
-      NOTES[${#NOTES[@]}]="${bundle}（${app}）— 版を判定できず未検査"
+      NOTES[${#NOTES[@]}]="${bundle}（$(quote_name "$app")）— 版を判定できず未検査"
       continue
     fi
     if [ "$bundle" = "org.mozilla.firefox" ] \
       && LC_ALL=C grep -qi 'esr' "$app/Contents/Resources/defaults/pref/channel-prefs.js" 2>/dev/null; then
-      NOTES[${#NOTES[@]}]="Firefox ESR（${app}）— ESR の系列は未検査"
+      NOTES[${#NOTES[@]}]="Firefox ESR（$(quote_name "$app")）— ESR の系列は未検査"
       continue
     fi
     lookup_minimum_row "$component" "$version"
+    warn_old_series "$component" "$version" && continue
     if [ -z "$MIN_ROW_MINIMUM" ] || [ "$MIN_ROW_MINIMUM" = "EOL" ]; then
-      security_detail "${bundle} ${version}（${app}）— この系列は最低版リストに未掲載"
+      security_detail "${bundle} ${version}（$(quote_name "$app")）— この系列は最低版リストに未掲載"
       continue
     fi
     if ! version_less_than "$version" "$MIN_ROW_MINIMUM"; then
-      security_detail "${bundle} ${version}（${app}）— 最低版 ${MIN_ROW_MINIMUM} 以上"
+      security_detail "${bundle} ${version}（$(quote_name "$app")）— 最低版 ${MIN_ROW_MINIMUM} 以上"
       continue
     fi
     label="$bundle"; remedy="アプリを最新版へ更新してください"
@@ -1456,11 +1651,14 @@ check_app_minimums() {
     fi
     if [ "$running" = "yes" ]; then
       # サーバーとして外から攻撃される（実際に悪用されている）ので FAIL にする
-      add_failure "${label} ${version}（${app}）が動いています。修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+      add_failure "${label} ${version}（$(quote_name "$app")）が動いています。修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
     else
-      add_warning "${label} ${version}（${app}）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
+      add_warning "${label} ${version}（$(quote_name "$app")）は修正版 ${MIN_ROW_MINIMUM} より古い版です（${MIN_ROW_REASON}）。${remedy}"
     fi
   done < "$apps"
+  if [ -s "$apps" ] && [ "$read_count" -eq 0 ]; then
+    NOTES[${#NOTES[@]}]="アプリの最低版は Info.plist を一件も読めず未検査"
+  fi
 }
 
 # Electron 製のアプリ（Contents/Frameworks/Electron Framework.framework を持つ .app）の参考表示です。
@@ -1468,7 +1666,7 @@ check_app_minimums() {
 # 「その日より前の版のままかもしれない」と NOTES に 1 件ずつ出します。版は比べず、WARN にもしません。
 # アプリは起動せず、Info.plist の中身と更新日だけを見ます。
 check_electron_apps() {
-  local plutil_cmd apps app plist after name version raw_version plist_date
+  local apps app plist after name version raw_version plist_date
   if [ ! -f "$SECURITY_MINIMUMS" ]; then
     NOTES[${#NOTES[@]}]="Electron 製アプリの更新確認は同梱リスト不足のため未検査"
     return
@@ -1479,7 +1677,6 @@ check_electron_apps() {
     NOTES[${#NOTES[@]}]="Electron 製アプリの更新確認は判定表に基準日（electron-after）が無いため未検査"
     return
   fi
-  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
   apps="$TMP_DIR/electron-app-bundles.list"
   list_app_bundles | awk 'NF && !seen[$0]++' > "$apps"
   while IFS= read -r app; do
@@ -1498,11 +1695,11 @@ check_electron_apps() {
     name="${app##*/}"
     name="${name%.app}"
     version=""
-    if [ -n "$plutil_cmd" ]; then
-      raw_version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+    if [ -f "$plist" ]; then
+      raw_version="$(plist_value "$plist" CFBundleShortVersionString 2>/dev/null || true)"
       version="$(leading_version "$raw_version")"
       if [ -z "$version" ]; then
-        raw_version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+        raw_version="$(plist_value "$plist" CFBundleVersion 2>/dev/null || true)"
         version="$(leading_version "$raw_version")"
       fi
     fi
@@ -1540,9 +1737,13 @@ check_brew_formula_minimums() {
     case "$row_component" in brew:*) printf '%s\n' "${row_component#brew:}" >> "$formulas";; esac
   done < "$SECURITY_MINIMUMS"
   LC_ALL=C sort -u "$formulas" > "$formulas.sorted"
+  if ! run_timeout 30 "$brew_cmd" list --versions > "$TMP_DIR/brew-minimum-installed" 2>/dev/null; then
+    NOTES[${#NOTES[@]}]="Homebrew の最低版は導入済み版を取得できず未検査"
+    return
+  fi
   while IFS= read -r formula; do
     [ -n "$formula" ] || continue
-    output="$(run_timeout 30 "$brew_cmd" list --versions "$formula" 2>/dev/null || true)"
+    output="$(awk -v name="$formula" '$1 == name { print }' "$TMP_DIR/brew-minimum-installed")"
     [ -n "$output" ] || continue
     read -r -a words <<EOF
 $output
@@ -1557,6 +1758,8 @@ EOF
         else
           add_warning "Homebrew の ${formula} ${version} は修正版 ${BREW_MIN_MINIMUM} より古い版です（${BREW_MIN_REASON}）。brew upgrade ${formula} で更新してください"
         fi
+      elif warn_old_series "Homebrew の $formula" "${version%%_*}"; then
+        :
       elif [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != "EOL" ]; then
         security_detail "Homebrew の ${formula} ${version} — 最低版 ${MIN_ROW_MINIMUM} 以上"
       else
@@ -2277,7 +2480,7 @@ check_python_packages() {
       repo_name="$(basename -- "$repo")"
       for site in "$venv"/lib/python3.*/site-packages; do
         [ -d "$site" ] || continue
-        add_python_site_candidate "$candidates" venv "$site" "$venv/bin/python" "${repo_name}/${relative}"
+        add_python_site_candidate "$candidates" venv "$site" "$venv/bin/python" "$(quote_name "$repo_name")/$(quote_name "$relative")"
       done
     done < <(find "$repo" -maxdepth 3 \( -name .git -o -name node_modules \) -prune -o -type f -name pyvenv.cfg -print0 2>/dev/null)
   done < "$REPO_LIST"
@@ -2843,11 +3046,9 @@ software_is_cli_managed() {
 }
 
 software_make_app_inventory() {
-  local output="$1" plutil_cmd app plist folder display bundle version receipt
+  local output="$1" app plist folder display bundle version receipt read_count=0
   local apps
   : > "$output"
-  plutil_cmd="$(command -v plutil 2>/dev/null || true)"
-  [ -n "$plutil_cmd" ] || return
   apps="$TMP_DIR/software-app-bundles.list"
   list_app_bundles | awk 'NF && !seen[$0]++' > "$apps"
   while IFS= read -r app; do
@@ -2855,11 +3056,12 @@ software_make_app_inventory() {
     [ -f "$plist" ] || continue
     folder="${app##*/}"
     display="${folder%.app}"
-    bundle="$("$plutil_cmd" -extract CFBundleIdentifier raw -o - "$plist" 2>/dev/null || true)"
-    version="$("$plutil_cmd" -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || true)"
+    bundle="$(plist_value "$plist" CFBundleIdentifier 2>/dev/null || true)"
+    version="$(plist_value "$plist" CFBundleShortVersionString 2>/dev/null || true)"
     if [ -z "$version" ]; then
-      version="$("$plutil_cmd" -extract CFBundleVersion raw -o - "$plist" 2>/dev/null || true)"
+      version="$(plist_value "$plist" CFBundleVersion 2>/dev/null || true)"
     fi
+    [ -z "$bundle" ] || read_count=$((read_count + 1))
     receipt=0
     [ ! -e "$app/Contents/_MASReceipt" ] || receipt=1
     folder="$(printf '%s' "$folder" | tr '\t\n' '  ')"
@@ -2868,6 +3070,9 @@ software_make_app_inventory() {
     version="$(printf '%s' "$version" | tr '\t\n' '  ')"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$app" "$folder" "$display" "${bundle:--}" "${version:--}" "$receipt" >> "$output"
   done < "$apps"
+  if [ -s "$apps" ] && [ "$read_count" -eq 0 ]; then
+    NOTES[${#NOTES[@]}]="アプリの目録は Info.plist を一件も読めず未検査"
+  fi
 }
 
 software_prepare_catalog() {
@@ -3342,6 +3547,8 @@ PY
     else
       NOTES[${#NOTES[@]}]="npm のグローバル更新確認は未検査"
     fi
+  else
+    NOTES[${#NOTES[@]}]="npm 不在のためグローバルソフトの更新確認は未検査"
   fi
 
   if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] && [ -s "$auto_candidates" ]; then
@@ -3818,16 +4025,16 @@ note_non_git_dir() {
   [ "$RH_WARN_NONGIT" = "1" ] || return 0
   [ "$RH_SECURITY_ONLY" = "1" ] && return 0
   if [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -not -name '.DS_Store' -print -quit 2>/dev/null)" ]; then
-    NOTES[${#NOTES[@]}]="$(clean_text "$name") — 空のフォルダ（git 管理外）"
+    NOTES[${#NOTES[@]}]="$(quote_name "$name") — 空のフォルダ（git 管理外）"
     return 0
   fi
   for ignored in "${RH_NONGIT_IGNORE[@]+"${RH_NONGIT_IGNORE[@]}"}"; do
     if [ "$ignored" = "$name" ]; then
-      NOTES[${#NOTES[@]}]="$(clean_text "$name") — git 管理外のフォルダ（RH_NONGIT_IGNORE により参考扱い）"
+      NOTES[${#NOTES[@]}]="$(quote_name "$name") — git 管理外のフォルダ（RH_NONGIT_IGNORE により参考扱い）"
       return 0
     fi
   done
-  add_warning "$name — git 管理外のフォルダです。点検の対象になっていません（git init して remote を設定するか、別の場所へ移すか、RH_NONGIT_IGNORE に名前を加えてください）"
+  add_warning "$(quote_name "$name") — git 管理外のフォルダです。点検の対象になっていません（git init して remote を設定するか、別の場所へ移すか、RH_NONGIT_IGNORE に名前を加えてください）"
 }
 
 [ "$RH_SKIP_SECURITY" = "1" ] || check_node_kegs_health
@@ -3869,6 +4076,8 @@ fi
 mail_failures="$(cat "$STATE_DIR/mail-failures" 2>/dev/null || true)"
 is_uint "$mail_failures" || mail_failures=0
 
+apply_allowances
+
 fail_count=${#FAILURES[@]}
 warn_count=${#WARNINGS[@]}
 generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
@@ -3893,22 +4102,22 @@ mail_log="$TMP_DIR/mail-log"
     for item in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do printf -- '- WARN  %s\n' "$item"; done
   fi
   printf '\n## ② 自動で直したもの\n\n'
-  if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf 'なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf -- '- %s\n' "$item"; done; fi
+  if [ "${#AUTOFIXED[@]}" -eq 0 ]; then printf 'なし\n'; else for item in "${AUTOFIXED[@]+"${AUTOFIXED[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done; fi
   if [ "$RH_SECURITY_ONLY" = "1" ]; then
     printf '\n## ③ 参考（Mac のセキュリティ・ソフト更新）\n\n'
   else
     printf '\n## ③ 参考（作業中・同期待ち・CLI 更新あり・Mac のセキュリティ・ソフト更新）\n\n'
     printf -- '- 作業中: %s件\n- 同期待ち: %s件\n- CLI 更新あり: %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}"
-    for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$item"; done
-    for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$item"; done
-    for item in "${CLI_UPDATES[@]+"${CLI_UPDATES[@]}"}"; do printf -- '- %s\n' "$item"; done
+    for item in "${WORKING[@]+"${WORKING[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
+    for item in "${SYNC_WAIT[@]+"${SYNC_WAIT[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
+    for item in "${CLI_UPDATES[@]+"${CLI_UPDATES[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
   fi
   printf -- '- ソフト更新あり: %s件\n' "${#SOFTWARE_UPDATES[@]}"
   for item in "${SOFTWARE_UPDATES[@]+"${SOFTWARE_UPDATES[@]}"}"; do printf -- '- ソフト更新: %s\n' "$item"; done
-  for item in "${NOTES[@]+"${NOTES[@]}"}"; do printf -- '- %s\n' "$item"; done
+  for item in "${NOTES[@]+"${NOTES[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
   printf "\n## ④ 全文の場所\n\n- 最新: \`%s\`\n- 履歴: \`%s\`\n" "$REPORT" "$LOG_FILE"
   printf '\n---\n\n## 点検詳細\n\n'
-  for item in "${DETAILS[@]+"${DETAILS[@]}"}"; do printf -- '- %s\n' "$item"; done
+  for item in "${DETAILS[@]+"${DETAILS[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
 } > "$report_draft" || fatal "レポートを書き込めません: $REPORT"
 chmod 600 "$report_draft" 2>/dev/null || true
 
