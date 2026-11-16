@@ -1,0 +1,4 @@
+# 種類	対象	定義のmd5先頭12字（空欄可）	期限YYYY-MM-DD（最長180日）	理由	所有アプリ（省略可）
+# policy_open	public.app_a_profiles:app_a_access		YYYY-MM-DD	公開一覧として確認	app-a
+# repo_public	app-a:-		YYYY-MM-DD	公開用途を確認	app-a
+# rls_off と browser_service_key は据え置けません。

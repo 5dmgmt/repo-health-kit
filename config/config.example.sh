@@ -89,3 +89,15 @@ RH_KIT_UPDATE_CHECK=1
 
 # 自動テストなどでデスクトップ通知も止める場合だけ 1 にします。
 RH_NO_DESKTOP=0
+
+# データの守り。静的点検は毎回動きます。GitHub への通信だけを止める場合は 0 です。
+RH_DATA_GITHUB=1
+RH_DATA_GUARD_TIMEOUT=300
+# RH_DATA_ALLOW="$HOME/.config/repo-health-kit/data-allow.tsv"
+# RH_SUPABASE_APPS="$HOME/.config/repo-health-kit/supabase-apps.tsv"
+# 本番への読み取りは利用者が設定した場合だけです。docs/data-guard.md を参照してください。
+RH_SUPABASE_CATALOG=0
+RH_SUPABASE_CATALOG_REFS=''
+RH_SUPABASE_CATALOG_KEYCHAIN='repo-health-kit-supabase-audit'
+RH_SUPABASE_ANON_PROBE=0
+RH_SITE_URLS=''

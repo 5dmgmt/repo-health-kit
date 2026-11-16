@@ -95,6 +95,16 @@ RH_ENV_AUTOFIX_SOFTWARE_SET="${RH_AUTOFIX_SOFTWARE+x}"; RH_ENV_AUTOFIX_SOFTWARE_
 RH_ENV_SOFTWARE_STALE_DAYS_SET="${RH_SOFTWARE_STALE_DAYS+x}"; RH_ENV_SOFTWARE_STALE_DAYS_VALUE="${RH_SOFTWARE_STALE_DAYS-}"
 RH_ENV_SOFTWARE_IGNORE_SET="${RH_SOFTWARE_IGNORE+x}"; RH_ENV_SOFTWARE_IGNORE_VALUE="${RH_SOFTWARE_IGNORE-}"
 RH_ENV_SOFTWARE_SKIP_TOOLS_SET="${RH_SOFTWARE_SKIP_TOOLS+x}"; RH_ENV_SOFTWARE_SKIP_TOOLS_VALUE="${RH_SOFTWARE_SKIP_TOOLS-}"
+RH_ENV_DATA_GUARD_TIMEOUT_SET="${RH_DATA_GUARD_TIMEOUT+x}"; RH_ENV_DATA_GUARD_TIMEOUT_VALUE="${RH_DATA_GUARD_TIMEOUT-}"
+RH_ENV_DATA_GUARD_SCANNER_SET="${RH_DATA_GUARD_SCANNER+x}"; RH_ENV_DATA_GUARD_SCANNER_VALUE="${RH_DATA_GUARD_SCANNER-}"
+RH_ENV_DATA_ALLOW_SET="${RH_DATA_ALLOW+x}"; RH_ENV_DATA_ALLOW_VALUE="${RH_DATA_ALLOW-}"
+RH_ENV_DATA_GITHUB_SET="${RH_DATA_GITHUB+x}"; RH_ENV_DATA_GITHUB_VALUE="${RH_DATA_GITHUB-}"
+RH_ENV_SUPABASE_APPS_SET="${RH_SUPABASE_APPS+x}"; RH_ENV_SUPABASE_APPS_VALUE="${RH_SUPABASE_APPS-}"
+RH_ENV_SUPABASE_CATALOG_SET="${RH_SUPABASE_CATALOG+x}"; RH_ENV_SUPABASE_CATALOG_VALUE="${RH_SUPABASE_CATALOG-}"
+RH_ENV_SUPABASE_CATALOG_REFS_SET="${RH_SUPABASE_CATALOG_REFS+x}"; RH_ENV_SUPABASE_CATALOG_REFS_VALUE="${RH_SUPABASE_CATALOG_REFS-}"
+RH_ENV_SUPABASE_CATALOG_KEYCHAIN_SET="${RH_SUPABASE_CATALOG_KEYCHAIN+x}"; RH_ENV_SUPABASE_CATALOG_KEYCHAIN_VALUE="${RH_SUPABASE_CATALOG_KEYCHAIN-}"
+RH_ENV_SUPABASE_ANON_PROBE_SET="${RH_SUPABASE_ANON_PROBE+x}"; RH_ENV_SUPABASE_ANON_PROBE_VALUE="${RH_SUPABASE_ANON_PROBE-}"
+RH_ENV_SITE_URLS_SET="${RH_SITE_URLS+x}"; RH_ENV_SITE_URLS_VALUE="${RH_SITE_URLS-}"
 if [ -z "$RH_ENV_ROOTS_SET" ]; then
   RH_ROOTS=("$HOME/Plugins")
 fi
@@ -154,6 +164,17 @@ elif [ -z "${RH_SOFTWARE_IGNORE+x}" ]; then
   RH_SOFTWARE_IGNORE=()
 fi
 [ -z "$RH_ENV_SOFTWARE_SKIP_TOOLS_SET" ] || RH_SOFTWARE_SKIP_TOOLS="$RH_ENV_SOFTWARE_SKIP_TOOLS_VALUE"
+
+[ -z "$RH_ENV_DATA_GUARD_TIMEOUT_SET" ] || RH_DATA_GUARD_TIMEOUT="$RH_ENV_DATA_GUARD_TIMEOUT_VALUE"
+[ -z "$RH_ENV_DATA_GUARD_SCANNER_SET" ] || RH_DATA_GUARD_SCANNER="$RH_ENV_DATA_GUARD_SCANNER_VALUE"
+[ -z "$RH_ENV_DATA_ALLOW_SET" ] || RH_DATA_ALLOW="$RH_ENV_DATA_ALLOW_VALUE"
+[ -z "$RH_ENV_DATA_GITHUB_SET" ] || RH_DATA_GITHUB="$RH_ENV_DATA_GITHUB_VALUE"
+[ -z "$RH_ENV_SUPABASE_APPS_SET" ] || RH_SUPABASE_APPS="$RH_ENV_SUPABASE_APPS_VALUE"
+[ -z "$RH_ENV_SUPABASE_CATALOG_SET" ] || RH_SUPABASE_CATALOG="$RH_ENV_SUPABASE_CATALOG_VALUE"
+[ -z "$RH_ENV_SUPABASE_CATALOG_REFS_SET" ] || RH_SUPABASE_CATALOG_REFS="$RH_ENV_SUPABASE_CATALOG_REFS_VALUE"
+[ -z "$RH_ENV_SUPABASE_CATALOG_KEYCHAIN_SET" ] || RH_SUPABASE_CATALOG_KEYCHAIN="$RH_ENV_SUPABASE_CATALOG_KEYCHAIN_VALUE"
+[ -z "$RH_ENV_SUPABASE_ANON_PROBE_SET" ] || RH_SUPABASE_ANON_PROBE="$RH_ENV_SUPABASE_ANON_PROBE_VALUE"
+[ -z "$RH_ENV_SITE_URLS_SET" ] || RH_SITE_URLS="$RH_ENV_SITE_URLS_VALUE"
 
 add_node_paths
 
@@ -299,7 +320,7 @@ rotate_log "$LOG_FILE"
 rotate_log "$LOG_DIR/repo-health-launchd.log" truncate
 
 declare -a FAILURES WARNINGS AUTOFIXED WORKING SYNC_WAIT CLI_UPDATES SOFTWARE_UPDATES NOTES DETAILS
-FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); SOFTWARE_UPDATES=(); NOTES=(); DETAILS=()
+FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); SOFTWARE_UPDATES=(); NOTES=(); DETAILS=(); DATA_GUARD_NOTES=()
 
 add_failure() { FAILURES[${#FAILURES[@]}]="$(clean_text "$*")"; }
 add_warning() { WARNINGS[${#WARNINGS[@]}]="$(clean_text "$*")"; }
@@ -348,6 +369,11 @@ PY_ALLOW
     while IFS= read -r -d '' item; do
       [ -n "$item" ] || continue
       matched=0; protected=0
+      # データの据え置きは種類・対象・ハッシュを照合する専用表だけで扱います。
+      if [ -f "$TMP_DIR/data-guard-items" ] && grep -Fqx -- "$item" "$TMP_DIR/data-guard-items"; then
+        kept[${#kept[@]}]="$item"
+        continue
+      fi
       if [ "$level" = FAIL ] && [ -f "$TMP_DIR/protected-failures" ] && grep -Fqx -- "$item" "$TMP_DIR/protected-failures"; then protected=1; fi
       while IFS=$'\t' read -r status pattern expiry reason remaining; do
         [ "$status" = VALID ] || continue
@@ -434,6 +460,93 @@ streak_bump() {
 
 streak_reset() {
   rm -f "$(streak_file "$1")"
+}
+
+# データ点検の時間切れでは、curl・psql などの子もまとめて停止します。
+run_data_guard_timeout() {
+  perl - "$@" <<'PERL_DG'
+use strict;
+use warnings;
+use POSIX qw(setpgid);
+my $seconds = shift @ARGV;
+my $pid = fork();
+defined $pid or die "data guard: fork failed\n";
+if ($pid == 0) {
+    setpgid(0, 0) == 0 or die "data guard: setpgid failed\n";
+    exec @ARGV or die "data guard: exec failed\n";
+}
+setpgid($pid, $pid);
+my $stopped = 0;
+my $stop = sub {
+    if ($stopped) { kill 'KILL', -$pid; }
+    else { $stopped = 1; kill 'TERM', -$pid; alarm 2; }
+};
+$SIG{ALRM} = $stop;
+$SIG{TERM} = $stop;
+$SIG{HUP} = $stop;
+$SIG{INT} = $stop;
+alarm $seconds;
+my $result;
+do { $result = waitpid($pid, 0) } while $result == -1 && $!{EINTR};
+my $status = $?;
+alarm 0;
+# 親が先に終わっても、制限時間を超えた子を残しません。
+kill 'KILL', -$pid if $stopped;
+exit 124 if $stopped;
+exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+PERL_DG
+}
+
+check_data_guard() {
+  local output="$TMP_DIR/data-guard.tsv" valid_rows="$TMP_DIR/data-guard-valid.tsv" rc=0 tag level kind repo target message item
+  local limit="${RH_DATA_GUARD_TIMEOUT:-300}"
+  if ! is_uint "$limit" || [ "$limit" -eq 0 ]; then
+    add_warning "データの守りの点検が最後まで動きませんでした（未検査）"
+    printf '%s\n' "データの守りの点検が最後まで動きませんでした（未検査）" >> "$TMP_DIR/data-guard-items"
+    return
+  fi
+  run_data_guard_timeout "$limit" env RH_STATE_DIR="$STATE_DIR" \
+    RH_DATA_ALLOW="${RH_DATA_ALLOW:-$HOME/.config/repo-health-kit/data-allow.tsv}" \
+    RH_SUPABASE_APPS="${RH_SUPABASE_APPS:-}" RH_DATA_GITHUB="${RH_DATA_GITHUB:-1}" \
+    RH_SUPABASE_CATALOG="${RH_SUPABASE_CATALOG:-0}" \
+    RH_SUPABASE_CATALOG_REFS="${RH_SUPABASE_CATALOG_REFS:-}" \
+    RH_SUPABASE_CATALOG_KEYCHAIN="${RH_SUPABASE_CATALOG_KEYCHAIN:-repo-health-kit-supabase-audit}" \
+    RH_SUPABASE_ANON_PROBE="${RH_SUPABASE_ANON_PROBE:-0}" RH_SITE_URLS="${RH_SITE_URLS:-}" \
+    RH_TODAY="${RH_TODAY:-$(TZ=Asia/Tokyo date '+%Y-%m-%d')}" \
+    python3 -I "${RH_DATA_GUARD_SCANNER:-$SCRIPT_DIR/data-guard.py}" --repos-file "$REPO_LIST" > "$output" 2>/dev/null || rc=$?
+  # 空出力・途中終了・壊れた行を正常と読みません。
+  if ! python3 -I - "$output" "$repo_count" > "$valid_rows" <<'PY_DG'
+import re
+import sys
+from pathlib import Path
+rows = Path(sys.argv[1]).read_text().splitlines()
+valid = bool(rows and re.fullmatch(r'DG_DONE\t' + re.escape(sys.argv[2]) + r'\t[0-9]+', rows[-1]))
+for row in rows:
+    if row.startswith('DG_DONE\t'):
+        continue
+    fields = row.split('\t')
+    row_valid = len(fields) == 6 and fields[0] == 'DG' and fields[1] in ('FAIL', 'WARN', 'NOTE', 'INFO')
+    valid = valid and row_valid
+    if row_valid:
+        print(row)
+raise SystemExit(0 if valid else 1)
+PY_DG
+  then
+    rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    add_warning "データの守りの点検が最後まで動きませんでした（未検査）"
+    printf '%s\n' "データの守りの点検が最後まで動きませんでした（未検査）" >> "$TMP_DIR/data-guard-items"
+  fi
+  while IFS=$'\t' read -r tag level kind repo target message; do
+    [ "$tag" = DG ] || continue
+    item="データの守り: $(quote_name "$repo") / $(quote_name "$target") — $kind: $message"
+    case "$level" in
+      FAIL) add_failure "$item"; printf '%s\n' "$item" >> "$TMP_DIR/data-guard-items";;
+      WARN) add_warning "$item"; printf '%s\n' "$item" >> "$TMP_DIR/data-guard-items";;
+      INFO|NOTE) DATA_GUARD_NOTES[${#DATA_GUARD_NOTES[@]}]="$(clean_text "$level $item")";;
+    esac
+  done < "$valid_rows"
 }
 
 git_internal_path() {
@@ -3918,7 +4031,7 @@ print((date.fromisoformat(sys.argv[1]) - timedelta(days=1)).isoformat())
 PY_DATE
 )"
   : > "$current"
-  for item in "${NOTES[@]+"${NOTES[@]}"}" "${DETAILS[@]+"${DETAILS[@]}"}"; do
+  for item in "${NOTES[@]+"${NOTES[@]}"}" "${DETAILS[@]+"${DETAILS[@]}"}" "${DATA_GUARD_NOTES[@]+"${DATA_GUARD_NOTES[@]}"}"; do
     case "$item" in *未検査*) ;; *) continue;; esac
     key="unchecked-$(printf '%s' "$item" | cksum | awk '{print $1}')"
     grep -Fqx -- "$key" "$current" && continue
@@ -4060,6 +4173,8 @@ if [ "$repo_count" -eq 0 ]; then
   fi
 fi
 
+check_data_guard
+
 [ "$RH_SECURITY_ONLY" = "1" ] || check_cli_tools
 check_mac_security
 check_unchecked_streaks
@@ -4115,6 +4230,8 @@ mail_log="$TMP_DIR/mail-log"
   printf -- '- ソフト更新あり: %s件\n' "${#SOFTWARE_UPDATES[@]}"
   for item in "${SOFTWARE_UPDATES[@]+"${SOFTWARE_UPDATES[@]}"}"; do printf -- '- ソフト更新: %s\n' "$item"; done
   for item in "${NOTES[@]+"${NOTES[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
+  printf '\n## データの守り（Supabase ほか）\n\n'
+  for item in "${DATA_GUARD_NOTES[@]+"${DATA_GUARD_NOTES[@]}"}"; do printf -- '- %s\n' "$item"; done
   printf "\n## ④ 全文の場所\n\n- 最新: \`%s\`\n- 履歴: \`%s\`\n" "$REPORT" "$LOG_FILE"
   printf '\n---\n\n## 点検詳細\n\n'
   for item in "${DETAILS[@]+"${DETAILS[@]}"}"; do printf -- '- %s\n' "$(clean_text "$item")"; done
@@ -4150,7 +4267,9 @@ if [ $((fail_count + warn_count + mail_failures)) -gt 0 ]; then
       else
         printf '\n■ 参考\n  作業中 %s件 / 同期待ち %s件 / CLI 更新あり %s件 / ソフト更新あり %s件\n' "${#WORKING[@]}" "${#SYNC_WAIT[@]}" "${#CLI_UPDATES[@]}" "${#SOFTWARE_UPDATES[@]}"
       fi
-      printf '\n■ 全文の場所\n  %s\n' "$REPORT"
+      printf '\n■ データの守り（Supabase ほか）\n'
+      for item in "${DATA_GUARD_NOTES[@]+"${DATA_GUARD_NOTES[@]}"}"; do printf '  - %s\n' "$item"; done
+      printf '\n■ 全文の場所\n  %s\n'  "$REPORT"
     } > "$mail_body"
     if send_resend "$subject" "$(sed -n '1,$p' "$mail_body")"; then
       printf 'mail: sent\n' >> "$mail_log"

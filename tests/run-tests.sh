@@ -5,6 +5,8 @@
 
 set -uo pipefail
 
+export RH_DATA_GITHUB=0 RH_SUPABASE_CATALOG=0 RH_SUPABASE_ANON_PROBE=0 RH_SITE_URLS=
+
 TEST_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_DIR="$(unset CDPATH; cd -- "$TEST_DIR/.." && pwd)"
 HEALTH="$PROJECT_DIR/bin/repo-health.sh"
@@ -3257,6 +3259,12 @@ case "$1" in
 esac
 SH
 chmod +x "$fake_bin/launchctl"
+cat > "$fake_bin/gh" <<'SH'
+#!/bin/bash
+printf 'called\n' >> "$CASE_DIR/data-gh.log"
+exit 1
+SH
+chmod +x "$fake_bin/gh"
 HOME="$case_dir/home" PATH="$fake_bin:$PATH" CASE_DIR="$case_dir" \
   RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_NO_DESKTOP=1 RH_SKIP_SECURITY=1 \
   "$TEST_BASH" "$PROJECT_DIR/install.sh" > "$case_dir/output.txt" 2>&1
@@ -3277,6 +3285,83 @@ assert_contains 'plist にも nvm の既定 bin を足す' "$case_dir/plist-path
 assert_contains 'npm の場所を設定に残す'  "$case_dir/home/.config/repo-health-kit/config.sh" '^RH_NPM_DIR='
 assert_contains '手元の clone の場所を設定に残す' "$case_dir/home/.config/repo-health-kit/config.sh" '^RH_CLONE_DIR='
 if [ -f "$case_dir/home/.config/repo-health-kit/allow.tsv" ]; then pass 'install で空の据え置き表を作る'; else fail 'install で空の据え置き表を作る'; fi
+
+# install の配布先にも新しい照合スクリプトが必要です。
+if [ -f "$case_dir/home/Library/Application Support/repo-health-kit/bin/data-guard.py" ]; then pass 'install でデータ点検スクリプトを配置する'; else fail 'install でデータ点検スクリプトを配置する'; fi
+if [ ! -f "$case_dir/data-gh.log" ]; then pass '環境で止めた GitHub 点検を設定ファイルで再有効化しない'; else fail '環境で止めた GitHub 点検を設定ファイルで再有効化しない'; fi
+
+# ---- 0.7.0: データの守り（偽コマンド・偽リポのみ） ----
+case_dir="$TEST_TMP/k2-integration"
+make_remote_repo "$case_dir" app-a
+fake_bin="$case_dir/fake-bin"
+mkdir -p "$fake_bin"
+cat > "$case_dir/scanner.py" <<'PY_DG_FAKE'
+import os
+from pathlib import Path
+import sys
+import time
+with open(os.environ['K2_CALL_LOG'], 'a') as h:
+    h.write('call\n')
+mode = os.environ.get('K2_MODE', 'ok')
+if mode == 'timeout':
+    time.sleep(3)
+print('DG\tWARN\tfixture_warn\tapp-a\tpublic.app_a_profiles\t確認が必要です')
+print('DG\tINFO\tfixture_info\tapp-a\t-\t参考の点検結果です')
+if mode != 'missing':
+    paths = Path(sys.argv[-1]).read_bytes().split(b'\0')
+    count = sum(bool(p) and (Path(os.fsdecode(p)) / '.git').exists() for p in paths)
+    print(f'DG_DONE\t{count}\t1')
+raise SystemExit(1 if mode == 'nonzero' else 0)
+PY_DG_FAKE
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1 \
+  RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls"
+assert_count 'データの守りは全リポをまとめて一度呼ぶ' "$case_dir/calls" '^call$' 1
+assert_contains 'security-only にデータの守りの節を出す' "$case_dir/output.txt" '## データの守り（Supabase ほか）'
+assert_contains 'データの WARN は要対応に出す' "$case_dir/output.txt" 'WARN .*fixture_warn: 確認が必要です'
+assert_contains 'データの INFO は専用節に出す' "$case_dir/output.txt" 'INFO .*fixture_info: 参考の点検結果です'
+for dg_mode in missing nonzero timeout; do
+  run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1 \
+    RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls" \
+    RH_DATA_GUARD_TIMEOUT=1 K2_MODE="$dg_mode"
+  assert_contains "$dg_mode: データ点検の途中終了を未検査の WARN にする" "$case_dir/output.txt" 'WARN .*データの守りの点検が最後まで動きませんでした（未検査）'
+done
+cp "$TEST_TMP/k1-mail/fake-bin/security" "$TEST_TMP/k1-mail/fake-bin/curl" "$fake_bin/"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 \
+  RH_MAIL_TO=fixture@example.invalid FAKE_MAIL_PAYLOAD="$case_dir/mail.json" \
+  RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls"
+if python3 - "$case_dir/mail.json" <<'PY_DG_MAIL'
+import json
+from pathlib import Path
+import sys
+body = json.loads(Path(sys.argv[1]).read_text())['text']
+assert '■ データの守り（Supabase ほか）' in body
+assert 'fixture_info: 参考の点検結果です' in body
+assert 'WARN ' in body and 'fixture_warn' in body
+PY_DG_MAIL
+then pass 'データの要対応と参考をメール本文にも載せる'; else fail 'データの要対応と参考をメール本文にも載せる'; fi
+
+# 一般の文面一致の据え置きでは、専用のデータ据え置き条件を迂回できません。
+printf 'fixture_warn\t2026-12-01\tfixture\n' > "$case_dir/general-allow.tsv"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_TODAY=2026-11-16 \
+  RH_ALLOW_FILE="$case_dir/general-allow.tsv" \
+  RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls"
+assert_contains '一般の allow.tsv ではデータの指摘を据え置けない' "$case_dir/output.txt" 'WARN .*fixture_warn: 確認が必要です'
+mkdir -p "$REPO_PATH/supabase/migrations"
+printf 'create table app_a_profiles(id uuid);\n' > "$REPO_PATH/supabase/migrations/001.sql"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1
+assert_contains '実際のスキャナによる静的点検を本体の要対応へ載せる' "$case_dir/output.txt" 'WARN .*rls_off: migration の記述上は RLS'
+assert_not_contains '実際のスキャナが最後まで動く' "$case_dir/output.txt" 'データの守りの点検が最後まで動きませんでした'
+
+python3 -I "$PROJECT_DIR/tests/data_guard_test.py" > "$TEST_TMP/data-guard-tests.log" 2>&1
+dg_test_rc=$?
+cat "$TEST_TMP/data-guard-tests.log"
+read -r _dg_tag dg_total dg_failed < <(tail -1 "$TEST_TMP/data-guard-tests.log")
+if [ "${_dg_tag:-}" = DG_TEST_COUNTS ] && [ "${dg_total:-0}" -gt 0 ]; then
+  total=$((total + dg_total)); failed=$((failed + dg_failed))
+  if [ "$dg_test_rc" -ne 0 ] && [ "$dg_failed" -eq 0 ]; then fail 'データ点検テストの実行が完了する'; fi
+else
+  fail 'データ点検テストの件数を確認する'
+fi
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

@@ -158,7 +158,7 @@ Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=
 - `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
 - 「作業中」「同期待ち」は赤黄の対象外です。単発の dirty を異常とは決めつけません。
 - 「未検査」は異常なしを意味しません。npm、Homebrew、ネットワークの状態を確認して再実行してください。
-- 「参考」は、ローカルのレポート（`repo-health-latest.md`）にだけ載り、メールの要対応には数えません。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。入っているソフトの更新も、ここに `ソフト更新: …` の形で並びます。同じ更新が14日以上残ると、WARN に上がります。
+- 「参考」は、ローカルのレポート（`repo-health-latest.md`）に載り、メールの要対応には数えません。「データの守り」の参考はメールにも載ります。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。入っているソフトの更新も、ここに `ソフト更新: …` の形で並びます。同じ更新が14日以上残ると、WARN に上がります。
 
 Mac のセキュリティ点検の文面は、たとえば次のようになります。版やパスは Mac ごとに変わります。
 
@@ -323,3 +323,26 @@ Command Line Tools に入っている Python は 3.9 です。修正版の pip 2
 ## License
 
 MIT License です。詳細は [LICENSE](LICENSE) をご覧ください。
+
+
+## データの守り（Supabase ほか）
+
+0.7.0 では、各リポの SQL とアプリの入口をまとめて点検します。要対応は FAIL / WARN に入り、INFO / NOTE は「データの守り（Supabase ほか）」の節に載ります。この節はメールにも入り、`RH_SECURITY_ONLY=1` でも点検します。
+
+既定でオンになるものは次のとおりです。
+
+- migration などの SQL の RLS・方針・VIEW・DEFINER・Storage・GRANT と ORM の RLS 記述
+- Supabase の共有プロジェクト、重複する表名、複数リポの migration、SQL がない利用側の確認
+- ブラウザ側の秘密の変数名・client component と1段の import・`.next/static` の service_role JWT と `sb_secret_`
+- git 履歴の鍵ファイル名（初回は全履歴、以後は追加分、1リポ20秒上限）
+- cron / captcha の未設定時の素通り、Map の連射制限、新しく増えた認証不明の API 入口
+- テナント列と方針の using の照合
+- gh がありログイン済みの場合の GitHub 公開設定・Dependabot（24時間使い回し。`RH_DATA_GITHUB=0` で通信を停止）
+
+本番への読み取りは既定でオフです。`RH_SUPABASE_CATALOG=1` と専用接続の設定で目録、`RH_SUPABASE_ANON_PROBE=1` で公開鍵の GET、`RH_SITE_URLS` で本番サイトの外形を点検できます。[詳しい手順](docs/data-guard.md)と[監査役割の作り方](docs/supabase-audit-role.md)を確認してから設定してください。
+
+据え置きは `~/.config/repo-health-kit/data-allow.tsv`（`RH_DATA_ALLOW` で変更可）です。種類・対象・定義の md5 先頭12字（空欄可）・期限 YYYY-MM-DD・理由・所有アプリ（省略可）のタブ区切りです。[見本](config/data-allow.example.tsv)があります。期限は必須・最長180日、ハッシュを入れた行は定義が変わると効きません。SQL 内の `-- rh-allow: 理由 until YYYY-MM-DD` も使えます。RLS 無効とブラウザ側の service_role・秘密鍵は据え置けません。`RH_SUPABASE_APPS` の[所有アプリ台帳](config/supabase-apps.example.tsv)も任意で設定できます。
+
+「migration の記述上は〜（本番は未確認）」は、ファイルから読めた事実です。本番の適用状況は確認していません。動的 SQL や別リポからの修正、ORM、教材の名前、共通の認証ヘルパーなどでは誤検知・見逃しがあります。意図した公開表は期限付きで据え置けます。RLS 有効で方針0本の全拒否は指摘しません。共有プロジェクトの「ログインした人全員」は別アプリの利用者も含むため FAIL になります。
+
+`RH_DATA_GUARD_TIMEOUT` は初期値300秒です。終了の番兵がない・非0終了・時間切れは「未検査」の WARN にし、空出力を正常とは読みません。出力は名前・行番号・分類・定義ハッシュに限り、プロジェクト ref は先頭4字だけにします。
