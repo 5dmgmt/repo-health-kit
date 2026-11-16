@@ -3183,7 +3183,7 @@ case_dir="$TEST_TMP/k1b-env-names"
 make_remote_repo "$case_dir" names
 printf '.env.*\n' > "$REPO_PATH/.gitignore"
 printf 'PORT=3000\n' > "$REPO_PATH/.env.production"
-printf '%s\n' '-----BEGIN PRIVATE KEY-----' > "$REPO_PATH/"$'first\nWARN injected.txt'
+printf '%s%s\n' '-----BEGIN PRIVATE' ' KEY-----' > "$REPO_PATH/"$'first\nWARN injected.txt'
 run_health "$case_dir" "$case_dir/root with space"
 assert_contains 'gitignore 済みの標準 env は参考に出す' "$case_dir/output.txt" 'gitignore 済みの env ファイル 「.env.production」'
 assert_not_contains 'gitignore 済みの標準 env は WARN にしない' "$case_dir/output.txt" 'WARN .*git に入るおそれのある env ファイル'
