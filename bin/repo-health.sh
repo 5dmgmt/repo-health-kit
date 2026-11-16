@@ -1387,6 +1387,7 @@ PY
 
   description=""
   : > "$TMP_DIR/brew-security-warned.list"
+  : > "$TMP_DIR/brew-security-warned-items.tsv"
   while IFS=$'\t' read -r name installed latest; do
     item="$name $installed → $latest"
     # 最低版リスト（brew:<formula>）に載る formula が修正版より古いときは、同じ話を 2 度 WARN にせず、理由をここに添える
@@ -1400,12 +1401,14 @@ EOF
       fi
     done
     printf '%s\n' "$name" >> "$TMP_DIR/brew-security-warned.list"
+    printf '%s\t%s\n' "$name" "$item" >> "$TMP_DIR/brew-security-warned-items.tsv"
     if [ -z "$description" ]; then
       description="$item"
     else
       description="${description}、$item"
     fi
   done < "$remaining"
+  printf '%s\n' "${#WARNINGS[@]}" > "$TMP_DIR/brew-security-warning-index"
   add_warning "Mac のセキュリティ部品に更新が出ています: ${description}（brew upgrade で更新できます）"
   brew_prefix="$(brew --prefix 2>/dev/null || true)"
   [ -z "$brew_prefix" ] || security_detail "Homebrew: $brew_prefix"
@@ -3009,13 +3012,6 @@ PY
       done < "$auto_candidates"
       [ -z "$failed_names" ] || add_warning "Homebrew の自動更新に失敗: $failed_names"
     fi
-    if [ "$attempted_upgrade" = "1" ] && command -v node >/dev/null 2>&1 \
-      && ! run_timeout 20 node --version >/dev/null 2>&1; then
-      run_timeout 900 brew reinstall node >/dev/null 2>&1 || true
-      if ! run_timeout 20 node --version >/dev/null 2>&1; then
-        add_warning "Homebrew の自動更新のあと node が起動しません（brew reinstall node を確認）"
-      fi
-    fi
   fi
   : "$formula_rc" "$cask_rc"
 
@@ -3078,6 +3074,100 @@ PY
   security_detail "入っているソフト — Homebrew ${homebrew_checked}・アプリ ${app_checked}・App Store ${mas_checked}・npm ${npm_checked} 件を確認"
 }
 
+node_keg_is_healthy() {
+  local output
+  run_timeout 20 "$1" --version >/dev/null 2>&1 || return 1
+  output="$(run_timeout 20 "$1" "$TMP_DIR/node-health/check.js" 2>/dev/null)" || return 1
+  [ "$output" = "rh-node-ok" ]
+}
+
+refresh_brew_security_warning() {
+  local outdated="$TMP_DIR/node-health-outdated.json" pending="$TMP_DIR/node-health-outdated.list"
+  local name item description="" index i
+  local -a refreshed
+  [ -s "$TMP_DIR/brew-security-warned-items.tsv" ] || return
+  # 取得できなければ元の WARN を保ち、起動を再確認できた formula だけを除く。
+  : > "$pending"
+  if run_timeout 300 brew outdated --json=v2 > "$outdated" 2>/dev/null \
+    && python3 -I - "$outdated" > "$pending" 2>/dev/null <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+formulae = data.get("formulae")
+if not isinstance(formulae, list):
+    raise SystemExit(1)
+for formula in formulae:
+    if not isinstance(formula, dict) or not isinstance(formula.get("name"), str):
+        raise SystemExit(1)
+    print(formula["name"])
+PY
+  then
+    :
+  else
+    cp "$TMP_DIR/brew-security-warned.list" "$pending"
+  fi
+  : > "$TMP_DIR/brew-security-warned.list"
+  while IFS=$'\t' read -r name item; do
+    if grep -Fqx "$name" "$TMP_DIR/node-health-fixed.list" || ! grep -Fqx "$name" "$pending"; then
+      continue
+    fi
+    printf '%s\n' "$name" >> "$TMP_DIR/brew-security-warned.list"
+    if [ -z "$description" ]; then description="$item"; else description="${description}、$item"; fi
+  done < "$TMP_DIR/brew-security-warned-items.tsv"
+  index="$(cat "$TMP_DIR/brew-security-warning-index")"
+  refreshed=()
+  for ((i=0; i<${#WARNINGS[@]}; i++)); do
+    if [ "$i" = "$index" ]; then
+      if [ -n "$description" ]; then
+        refreshed[${#refreshed[@]}]="$(clean_text "Mac のセキュリティ部品に更新が出ています: ${description}（brew upgrade で更新できます）")"
+      fi
+    else
+      refreshed[${#refreshed[@]}]="${WARNINGS[$i]}"
+    fi
+  done
+  WARNINGS=("${refreshed[@]+"${refreshed[@]}"}")
+}
+
+check_node_kegs_health() {
+  local formula prefix bin before after
+  local formulas="$TMP_DIR/node-health-formulae.list" health_dir="$TMP_DIR/node-health"
+  command -v brew >/dev/null 2>&1 || return
+  run_timeout 300 brew list --formula -1 > "$formulas" 2>/dev/null || return
+  LC_ALL=C grep -Eq '^node(@[0-9]+)?$' "$formulas" || return
+  mkdir -p "$health_dir"
+  printf '%s\n' '{"name":"rh-node-health","version":"0.0.0","type":"commonjs"}' > "$health_dir/package.json"
+  printf '%s\n' 'console.log("rh-node-ok")' > "$health_dir/check.js"
+  : > "$TMP_DIR/node-health-fixed.list"
+  while IFS= read -r formula; do
+    [[ "$formula" =~ ^node(@[0-9]+)?$ ]] || continue
+    prefix="$(run_timeout 20 brew --prefix "$formula" 2>/dev/null)" || continue
+    bin="$prefix/bin/node"
+    [ -x "$bin" ] || continue
+    node_keg_is_healthy "$bin" && continue
+    if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] || [ "$RH_AUTOFIX_SECURITY" = "1" ]; then
+      before="$(brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 900 brew upgrade "$formula" >/dev/null 2>&1 || true
+      if ! node_keg_is_healthy "$bin"; then
+        HOMEBREW_NO_AUTO_UPDATE=1 run_timeout 900 brew reinstall "$formula" >/dev/null 2>&1 || true
+      fi
+      if node_keg_is_healthy "$bin"; then
+        after="$(brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
+        if [ "$before" = "$after" ]; then
+          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: ${formula} ${after} を入れ直し（部品の更新のあと起動しなくなったため作り直し版へ）"
+        else
+          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: ${formula} ${before} → ${after}（部品の更新のあと起動しなくなったため作り直し版へ）"
+        fi
+        printf '%s\n' "$formula" >> "$TMP_DIR/node-health-fixed.list"
+        continue
+      fi
+    fi
+    add_warning "Homebrew の ${formula} が起動しません（brew reinstall ${formula} を試してください）"
+  done < "$formulas"
+  refresh_brew_security_warning
+}
+
 check_mac_security() {
   if [ "$RH_SKIP_SECURITY" = "1" ]; then
     NOTES[${#NOTES[@]}]="Mac のセキュリティ点検は RH_SKIP_SECURITY=1 のため未検査"
@@ -3085,6 +3175,7 @@ check_mac_security() {
   fi
   check_brew_security
   check_installed_software
+  check_node_kegs_health
   check_minimum_versions php
   check_minimum_versions node
   check_java_versions

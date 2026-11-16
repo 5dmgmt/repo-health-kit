@@ -117,7 +117,7 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 - **それ以外のセキュリティ部品**（node、python、openssl、curl、php など）は、`RH_AUTOFIX_SECURITY=1` のときだけ、まとめて `brew upgrade` します。Node や Python の版が上がると、開発中のアプリの動きが変わることがあるため、初期値は 0（自動更新しない）です。0 のままなら、更新待ちの部品は WARN 1件にまとめて届きます。
 - 最低版の点検（PHP・Node.js・Java・GitLab・macOS・アプリなど）、composer の依存、macOS のアップデートでは、自動では直しません（Homebrew の php と node は、`RH_AUTOFIX_SECURITY=1` のとき上の更新に含まれます）。WARN や FAIL の文に、直し方の手がかりを添えます。
 - 自動更新では、名指しした部品だけを更新します。その部品に依存する別の部品（たとえば Node や Python）を、Homebrew の既定の動きでまとめて更新することはしません。
-- **入っているソフト**は、`RH_AUTOFIX_SOFTWARE=1` のときだけ、Homebrew の formula と、画面のあるアプリを持たない cask（フォントなど）を `brew upgrade` します。初期値は 0（自動更新しない）です。画面のあるアプリ、管理者のパスワードが要る pkg 形式のもの（zoom・Google Drive など）、App Store、npm の道具は、自動では更新しません。更新のあとに Node が起動しなくなったときは、`brew reinstall node` を1回だけ試し、それでも起動しなければ WARN でお知らせします。
+- **入っているソフト**は、`RH_AUTOFIX_SOFTWARE=1` のときだけ、Homebrew の formula と、画面のあるアプリを持たない cask（フォントなど）を `brew upgrade` します。初期値は 0（自動更新しない）です。画面のあるアプリ、管理者のパスワードが要る pkg 形式のもの（zoom・Google Drive など）、App Store、npm の道具は、自動では更新しません。更新のあとに Homebrew の node（`node`・`node@24` など）が起動しなくなったときは、その formula を `brew upgrade`、だめなら `brew reinstall` で1回だけ直し、それでも起動しなければ WARN でお知らせします。
 - 自動で更新したものは、レポートの「自動で直したもの」に載ります。自動更新に失敗したときは WARN でお知らせします。
 
 ### 外部へ接続するところ

@@ -99,18 +99,74 @@ make_fake_brew() {
   mkdir -p "$fake_bin"
   {
     printf '%s\n' '#!/bin/bash'
+    cat <<'SH'
+fix_node_kegs() {
+  [ -n "${FAKE_BREW_FIX_ON-}" ] && [ "${FAKE_BREW_FIX_ON}" = "$1" ] || return 0
+  shift
+  for formula in "$@"; do
+    case "$formula" in
+      node|node@[0-9]*) rm -f "${FAKE_BREW_STATE_DIR:?}/$formula.broken" ;;
+    esac
+  done
+}
+SH
     printf '%s\n' 'case "${1:-}" in'
     printf '%s\n' '  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;'
     printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_AFTER_JSON-}" ] && [ -s "${FAKE_BREW_LOG:-/dev/null}" ]; then printf "%s\n" "$FAKE_BREW_AFTER_JSON"; elif [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi ;;'
     printf '%s\n' '  info) if [ "${2:-}" = "--cask" ]; then if [ -n "${FAKE_BREW_CASK_INFO_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_CASK_INFO_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi; else exit 1; fi ;;'
-    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; printf "cleanup=%s\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
-    printf '%s\n' '  reinstall) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;'
-    printf '%s\n' '  list) printf "%b" "${FAKE_BREW_VERSIONS-}" | while IFS= read -r line; do case "$line" in "$3 "*) printf "%s\n" "$line";; esac; done ;;'
-    printf '%s\n' '  --prefix) printf "%s\n" "${FAKE_BREW_PREFIX:-/fake/homebrew}" ;;'
+    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; printf "cleanup=%s\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" >> "${FAKE_BREW_LOG:?}"; fix_node_kegs "$@"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
+    printf '%s\n' '  reinstall) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; fix_node_kegs "$@"; exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;'
+    cat <<'SH'
+  list)
+    if [ "${2:-}" = "--formula" ] && [ "${3:-}" = "-1" ]; then
+      printf '%s\n' "${FAKE_BREW_FORMULAE-}"
+    else
+      versions="${FAKE_BREW_VERSIONS-}"
+      if [ -n "${FAKE_BREW_FIXED_VERSIONS-}" ] && [ ! -f "${FAKE_BREW_STATE_DIR:?}/${3:-}.broken" ]; then
+        versions="$FAKE_BREW_FIXED_VERSIONS"
+      fi
+      printf '%b' "$versions" | while IFS= read -r line; do
+        case "$line" in "${3:-} "*) printf '%s\n' "$line";; esac
+      done
+    fi ;;
+  --prefix)
+    if [ -n "${2:-}" ]; then
+      printf '%s/opt/%s\n' "${FAKE_BREW_PREFIX:-/fake/homebrew}" "$2"
+    else
+      printf '%s\n' "${FAKE_BREW_PREFIX:-/fake/homebrew}"
+    fi ;;
+SH
     printf '%s\n' '  *) exit 1 ;;'
     printf '%s\n' 'esac'
   } > "$fake_bin/brew"
   chmod +x "$fake_bin/brew"
+}
+
+make_fake_node_keg() {
+  local case_dir="$1" formula="$2" broken="${3:-}" bin
+  bin="$case_dir/homebrew/opt/$formula/bin"
+  mkdir -p "$bin" "$case_dir/state"
+  [ -z "$broken" ] || printf '%s\n' "$broken" > "$case_dir/state/$formula.broken"
+  cat > "$bin/node" <<'SH'
+#!/bin/bash
+formula="${0%/bin/node}"
+formula="${formula##*/}"
+printf '%s %s\n' "$formula" "${1:-}" >> "${FAKE_NODE_KEG_LOG:?}"
+if [ -f "${FAKE_BREW_STATE_DIR:?}/$formula.broken" ]; then
+  mode="$(cat "$FAKE_BREW_STATE_DIR/$formula.broken")"
+  if [ "$mode" != "js" ] || [ "${1:-}" != "--version" ]; then exit 134; fi
+fi
+case "${1:-}" in
+  --version) printf 'v24.22.3\n' ;;
+  *.js)
+    grep -Fqx '{"name":"rh-node-health","version":"0.0.0","type":"commonjs"}' "${1%/*}/package.json" || exit 1
+    grep -Fqx 'console.log("rh-node-ok")' "$1" || exit 1
+    printf '%s\n' "${FAKE_NODE_KEG_OUTPUT-rh-node-ok}"
+    exit "${FAKE_NODE_KEG_JS_RC:-0}" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$bin/node"
 }
 
 make_fake_software_npm() {
@@ -443,6 +499,174 @@ run_security "$case_dir" "$fake_bin" \
 assert_contains 'RH_AUTOFIX_SECURITY=1 では node も brew upgrade する' "$case_dir/brew.log" '^upgrade node$'
 assert_contains 'node の更新を自動修復へ出す' "$case_dir/output.txt" 'node .*26\.11\.1 → 26\.12\.0 を自動更新'
 assert_not_contains 'node の自動更新成功時は更新 WARN を出さない' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
+
+# node の健康な keg と壊れた keg を分け、修復設定ごとの動きを確かめる。
+for scenario in upgrade reinstall none manual js security wrong-output nonzero; do
+  case_dir="$TEST_TMP/node-keg-$scenario"
+  fake_bin="$case_dir/fake-bin"
+  make_fake_brew "$fake_bin"
+  make_fake_node_keg "$case_dir" node
+  broken=all
+  [ "$scenario" != js ] || broken=js
+  make_fake_node_keg "$case_dir" node@24 "$broken"
+  : > "$case_dir/brew.log"
+  : > "$case_dir/node.log"
+  fix_on=upgrade; autofix_software=1; autofix_security=0
+  node_output=rh-node-ok; node_rc=0
+  fixed_versions=$'node 26.13.1\nnode@24 24.22.3_1\n'
+  case "$scenario" in
+    reinstall) fix_on=reinstall; fixed_versions=$'node 26.13.1\nnode@24 24.22.3\n' ;;
+    none) fix_on=none ;;
+    manual) autofix_software=0; fix_on=none ;;
+    security) autofix_software=0; autofix_security=1 ;;
+    wrong-output) node_output=unexpected ;;
+    nonzero) node_rc=134 ;;
+  esac
+  run_security "$case_dir" "$fake_bin" \
+    FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+    FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+    FAKE_BREW_FORMULAE=$'node\nnode@24\n' FAKE_BREW_FIX_ON="$fix_on" \
+    FAKE_BREW_VERSIONS=$'node 26.13.1\nnode@24 24.22.3\n' FAKE_BREW_FIXED_VERSIONS="$fixed_versions" \
+    FAKE_NODE_KEG_OUTPUT="$node_output" FAKE_NODE_KEG_JS_RC="$node_rc" \
+    RH_AUTOFIX_SOFTWARE="$autofix_software" RH_AUTOFIX_SECURITY="$autofix_security"
+  assert_contains "$scenario: node@24 の起動を確認する" "$case_dir/node.log" '^node@24 --version$'
+  if [ "$scenario" = manual ]; then
+    assert_not_contains '自動修復なしでは upgrade も reinstall もしない' "$case_dir/brew.log" '^(upgrade|reinstall)'
+  else
+    assert_contains "$scenario: node@24 を名指しして upgrade する" "$case_dir/brew.log" '^upgrade node@24$'
+    assert_contains "$scenario: upgrade は依存部品の巻き込みを止める" "$case_dir/brew.log" '^deps-check=1$'
+  fi
+  case "$scenario" in
+    reinstall|none|wrong-output|nonzero)
+      assert_count "$scenario: reinstall は1回だけ行う" "$case_dir/brew.log" '^reinstall node@24$' 1
+      if awk '/^(upgrade|reinstall) node@24$/ { print }' "$case_dir/brew.log" | \
+        diff - <(printf 'upgrade node@24\nreinstall node@24\n') >/dev/null; then
+        pass "$scenario: upgrade のあとに reinstall する"
+      else
+        fail "$scenario: upgrade のあとに reinstall する"
+      fi ;;
+    *) assert_not_contains "$scenario: reinstall は呼ばない" "$case_dir/brew.log" '^reinstall node@24$' ;;
+  esac
+  case "$scenario" in
+    none|manual|wrong-output|nonzero)
+      assert_contains "$scenario: 不健康な node@24 は WARN" "$case_dir/output.txt" 'WARN  Homebrew の node@24 が起動しません'
+      assert_not_contains "$scenario: 修復成功とは報告しない" "$case_dir/output.txt" 'Homebrew: node@24 '
+      ;;
+    *)
+      assert_contains "$scenario: node@24 の修復を AUTOFIXED に載せる" "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3'
+      assert_not_contains "$scenario: 直った node@24 の起動 WARN は出さない" "$case_dir/output.txt" 'WARN  Homebrew の node@24 が起動しません'
+      if [ "$scenario" = reinstall ]; then
+        assert_contains '前後の版が同じなら入れ直しと報告する' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 を入れ直し'
+      else
+        assert_contains "$scenario: brew の前後の版を報告する" "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 → 24\.22\.3_1'
+      fi ;;
+  esac
+  if [ "$scenario" != wrong-output ] && [ "$scenario" != nonzero ]; then
+    assert_not_contains "$scenario: 健康な node は修復しない" "$case_dir/brew.log" '^(upgrade|reinstall) node$'
+    assert_contains "$scenario: 健康な node でも JS を実行する" "$case_dir/node.log" '^node .*/node-health/check\.js$'
+  fi
+  if [ "$scenario" = js ]; then
+    assert_contains '版表示が通っても JS の異常を検出して修復する' "$case_dir/node.log" '^node@24 .*/node-health/check\.js$'
+  fi
+done
+
+# 元の文面を保って WARN の一部・全部を除き、巻き込み更新にも追従する。
+for scenario in partial all repaired-still-listed invalid-json incidental; do
+  case_dir="$TEST_TMP/node-keg-warning-$scenario"
+  fake_bin="$case_dir/fake-bin"
+  make_fake_brew "$fake_bin"
+  make_fake_node_keg "$case_dir" node
+  broken=all
+  [ "$scenario" != incidental ] || broken=""
+  make_fake_node_keg "$case_dir" node@24 "$broken"
+  make_fake_software_npm "$fake_bin"
+  printf '[]\n' > "$case_dir/catalog.json"
+  printf 'formula:rclone\t2026-10-01\n' > "$case_dir/state/software-outdated.tsv"
+  : > "$case_dir/brew.log"
+  : > "$case_dir/node.log"
+  # ca の失敗 WARN を前、rclone の遅延 WARN を後に置く。
+  brew_json='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"node@24","installed_versions":["24.22.3"],"current_version":"24.22.3_1"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+  after_json='{"formulae":[{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
+  case "$scenario" in
+    all|incidental) after_json='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}' ;;
+    repaired-still-listed) after_json="$brew_json" ;;
+    invalid-json) after_json='{"formulae":null}' ;;
+  esac
+  run_security "$case_dir" "$fake_bin" \
+    FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+    FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+    FAKE_BREW_FORMULAE=$'node\nnode@24\n' FAKE_BREW_FIX_ON=upgrade \
+    FAKE_BREW_VERSIONS=$'node 26.11.1\nnode@24 24.22.3\n' \
+    FAKE_BREW_JSON="$brew_json" FAKE_BREW_AFTER_JSON="$after_json" FAKE_BREW_UPGRADE_RC=1 \
+    RH_AUTOFIX_SOFTWARE=1 RH_AUTOFIX_SECURITY=0 RH_SKIP_SOFTWARE=0 RH_TODAY=2026-11-16 \
+    RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas"
+  assert_not_contains "$scenario: 直った node@24 の古い更新 WARN を除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新.*node@24'
+  case "$scenario" in
+    all|incidental)
+      assert_not_contains "$scenario: 項目がなくなれば WARN 行を除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
+      ;;
+    *)
+      assert_contains "$scenario: 更新待ちの node の元の文面を残す" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0（brew upgrade で更新できます）$'
+      ;;
+  esac
+  if python3 - "$case_dir/output.txt" "$scenario" <<'PY'
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    lines = handle.readlines()
+before = next(i for i, line in enumerate(lines) if "WARN  ca-certificates の自動更新に失敗" in line)
+after = len(lines) if sys.argv[2] == "invalid-json" else next(
+    i for i, line in enumerate(lines) if "WARN  rclone の更新が" in line
+)
+assert before < after
+if sys.argv[2] not in ("all", "incidental"):
+    middle = next(i for i, line in enumerate(lines) if "WARN  Mac のセキュリティ部品に更新" in line)
+    assert before < middle < after
+PY
+  then pass "$scenario: ほかの WARN の順番を変えない"; else fail "$scenario: ほかの WARN の順番を変えない"; fi
+  if [ "$scenario" = incidental ]; then
+    assert_not_contains '巻き込みで更新済みの健康な node は修復しない' "$case_dir/brew.log" '^(upgrade|reinstall) node(@24)?$'
+  fi
+done
+
+case_dir="$TEST_TMP/node-keg-warning-only"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node_keg "$case_dir" node@24 all
+: > "$case_dir/brew.log"
+: > "$case_dir/node.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+  FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+  FAKE_BREW_FORMULAE=node@24 FAKE_BREW_FIX_ON=upgrade \
+  FAKE_BREW_VERSIONS=$'node@24 24.22.3\n' RH_AUTOFIX_SOFTWARE=1 RH_SECURITY_ONLY=1 \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node@24","installed_versions":["24.22.3"],"current_version":"24.22.3_1"}]}'
+assert_contains '最後の WARN が消えても Bash 3.2 でレポートを作れる' "$case_dir/output.txt" '要対応: FAIL 0件 / WARN 0件'
+assert_contains '最後の WARN を消した場合も修復結果を残す' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 を入れ直し'
+
+case_dir="$TEST_TMP/node-keg-no-formula"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+# 名前の似た別 formula は起動確認しない。
+make_fake_node_keg "$case_dir" node-extra all
+: > "$case_dir/brew.log"
+: > "$case_dir/node.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+  FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+  FAKE_BREW_FORMULAE=$'python\nnode-extra\nnode@foo\n' RH_AUTOFIX_SOFTWARE=1 RH_SECURITY_ONLY=1
+assert_not_contains 'node formula がなければ起動確認をしない' "$case_dir/node.log" '.'
+assert_not_contains 'node formula がなければ修復をしない' "$case_dir/brew.log" '^(upgrade|reinstall)'
+assert_contains 'node formula がなければ要対応0件のまま' "$case_dir/output.txt" '要対応: FAIL 0件 / WARN 0件'
+
+case_dir="$TEST_TMP/node-keg-no-executable"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" \
+  FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_PREFIX="$case_dir/homebrew" \
+  FAKE_BREW_FORMULAE=node@24 RH_AUTOFIX_SOFTWARE=1
+assert_not_contains '実行できる node がない formula は修復しない' "$case_dir/brew.log" '^(upgrade|reinstall)'
+assert_not_contains '実行できる node がない formula は起動 WARN を出さない' "$case_dir/output.txt" 'WARN  Homebrew の node@24 が起動しません'
 
 case_dir="$TEST_TMP/php-warn"
 fake_bin="$case_dir/fake-bin"
