@@ -1311,7 +1311,7 @@ def main():
             label = ', '.join(r.label for r in group)
             guard.emit('INFO', 'shared_project', label, ref[:4] + '…', f'{len(group)}リポが同じプロジェクトを使っています。方針の当たりはこの全リポへ影響します。スキーマ・所属条件・プロジェクトの分離を検討してください')
             if sum(bool(r.sql) for r in group) > 1:
-                guard.emit('WARN', 'migration_collision', label, ref[:4] + '…', '複数リポに SQL があり migration 履歴がぶつかる可能性があります')
+                guard.finding('WARN', 'migration_collision', label, ref[:4] + '…', '複数リポに SQL があり migration 履歴がぶつかる可能性があります')
         for repo in group:
             if not repo.sql:
                 guard.emit('NOTE', 'migration_missing', repo.label, ref[:4] + '…', 'SQL の表定義がなく静的には未検査です。公開鍵の実測か本番カタログで確認してください')
