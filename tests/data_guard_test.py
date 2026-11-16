@@ -719,6 +719,19 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
         self.sql("create policy app_a_any_read on storage.objects for select to authenticated using (bucket_id = 'app-a-files');", filename='002.sql')
         self.assert_hit(self.scan(), 'WARN', 'storage_policy')
 
+    def test_app_specific_auth_names(self):
+        # アプリ独自の名前のログイン確認は、認証の記述として認める
+        self.write('app/api/app-a/items/route.ts', "import { getSessionUserId } from '@/lib/server/auth';\nconst key = process.env.SUPABASE_SERVICE_ROLE_KEY;\nexport async function GET(req) { const id = await getSessionUserId(req); if (id === null) return new Response('', { status: 401 }); }\n")
+        self.assert_no_hit(self.scan(), 'api_service_auth')
+
+    def test_tenant_boundary_skips_server_only_and_self_only(self):
+        self.sql("create table app_a_members(id uuid, org_id uuid, email text); alter table app_a_members enable row level security;"
+                 " create policy app_a_server on app_a_members for all to service_role using (true);"
+                 " create policy app_a_self on app_a_members for select to authenticated using (email = public.app_a_request_email());")
+        self.assert_no_hit(self.scan(), 'tenant_boundary')
+        self.sql("create policy app_a_any on app_a_members for select to authenticated using (email is not null);", filename='002.sql')
+        self.assert_hit(self.scan(), 'WARN', 'tenant_boundary')
+
     def test_catalog_zero(self):
         data = catalog_data()
         data.update(tables_total=0, tables=[])

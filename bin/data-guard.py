@@ -27,7 +27,8 @@ REF_URL = re.compile(r'https://([a-z0-9]{20})\.supabase\.co\b')
 SECRET_WORDS = r'SECRET|SERVICE_ROLE|PASSWORD|PRIVATE_KEY|ACCESS_TOKEN|REFRESH_TOKEN'
 SECRET_NAME = re.compile(r'NEXT_PUBLIC_(?:[A-Z0-9]+_)*(?:' + SECRET_WORDS + r')(?:_[A-Z0-9]+)*')
 JS_TOKEN = re.compile(r'''//[^\n]*|/\*[\s\S]*?\*/|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"''')
-AUTH = re.compile(r'\b(?:getUser|getSession|auth|authenticate|authorize|verifyToken|requireUser|requireAuth)\s*[.(]', re.I)
+# アプリ独自の名前の確認（getSessionUserId・getSAUser・verifySessionToken・verifyCronSecret・requireAdmin など）も認める
+AUTH = re.compile(r'\b(?:getUser|getSession|auth|authenticate|authorize|verifyToken|requireUser|requireAuth|(?:get|require|verify|check|assert|ensure|with)[A-Za-z0-9]*(?:User|Session|Auth|Admin|Token|Secret|Login)[A-Za-z0-9]*)\s*[.(]', re.I)
 TENANT = re.compile(r'\b(?:org_id|tenant_id|team_id|company_id|workspace_id)\b', re.I)
 
 
@@ -680,7 +681,13 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
             guard.finding(level, kind, src.repo, f'{target}:{pn}', 'migration の記述上は' + message + '（本番は未確認）', source=src, definition_hash=digest(p['sql']))
         t = tables.get(target)
         using = p['using'] or ''
-        if t and t['columns'] and p['cmd'] != 'INSERT' and not any(c.lower() in using.lower() for c in t['columns']) and not re.search(r'\bselect\b', using, re.I):
+        # サーバー専用（to service_role だけ）の方針と、本人だけに絞る方針は、会社をまたぐ穴にならないので見ない
+        server_only = set(r.lower() for r in p['roles']) <= {'service_role'}
+        # 本人（uid・email）だけ、または管理者・会員かを関数で確かめる方針も、会社をまたぐ穴にはならない
+        self_only = bool(re.search(r"auth\.uid\s*\(\s*\)|auth\.jwt\s*\(|auth\.email\s*\(|current_setting\s*\(\s*'(?:app|request)\.[a-z_.]*(?:user|email|sub)|\b[a-z0-9_]*(?:request_email|request_uid|current_user_id|is_superadmin|is_admin|is_member|is_owner|request_is_[a-z_]+)\s*\(", using, re.I))
+        if redone:
+            server_only = True
+        if t and t['columns'] and p['cmd'] != 'INSERT' and not server_only and not self_only and not any(c.lower() in using.lower() for c in t['columns']) and not re.search(r'\bselect\b', using, re.I):
             guard.finding('WARN', 'tenant_boundary', src.repo, f'{target}:{pn}', 'migration の記述上は using にテナント列・所属の副問い合わせが見つかりません（本番は未確認）', source=src)
     for target, (src, material, invoker) in views.items():
         if target.startswith('public.') and (material or not invoker):
