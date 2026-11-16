@@ -682,6 +682,43 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
         self.sql('create table app_a_profiles(id uuid); alter table app_a_profiles enable row level security;')
         self.assert_hit(self.catalog(), 'FAIL', 'catalog_drift')
 
+    def test_catalog_drift_safe_direction(self):
+        # migration に有効化が無く、本番は有効 → 安全な向きの食い違いは NOTE、静的な rls_off は出さない
+        self.sql('create table app_a_profiles(id uuid);')
+        data = catalog_data()
+        data['tables'][0]['rls'] = True
+        out = self.catalog(data)
+        self.assert_hit(out, 'NOTE', 'catalog_drift')
+        self.assertNotRegex(out, r'DG\t(?:FAIL|WARN)\tcatalog_drift\t')
+        self.assertNotRegex(out, r'DG\t(?:FAIL|WARN)\trls_off\t')
+
+    def test_catalog_table_only_in_migration(self):
+        # migration にだけある表（本番に無い）は、静的な rls_off を注記に下げる
+        self.sql('create table app_a_profiles(id uuid); alter table app_a_profiles enable row level security; create table app_a_legacy(id uuid);')
+        data = catalog_data()
+        data['tables'][0]['rls'] = True
+        out = self.catalog(data)
+        self.assertRegex(out, r'DG\tNOTE\trls_off\t[^\t]*\tpublic\.app_a_legacy\t')
+        self.assertNotRegex(out, r'DG\t(?:FAIL|WARN)\trls_off\t[^\t]*\tpublic\.app_a_legacy\t')
+
+    def test_catalog_definer_anon_and_authenticated(self):
+        data = catalog_data()
+        data['tables'][0]['rls'] = True
+        data['functions'] = [
+            {'target': 'public.app_a_open()', 'search_path': True, 'executable': True, 'anon': True, 'hash': 'aaaaaaaaaaaa'},
+            {'target': 'public.app_a_member()', 'search_path': True, 'executable': True, 'anon': False, 'hash': 'bbbbbbbbbbbb'},
+        ]
+        out = self.catalog(data)
+        self.assertRegex(out, r'DG\tWARN\tdefiner_execute\t[^\t]*\tpublic\.app_a_open\(\)\t')
+        self.assertRegex(out, r'DG\tINFO\tdefiner_authenticated\t[^\t]*\tpublic\.app_a_member\(\)\t')
+        self.assertNotRegex(out, r'DG\tWARN\tdefiner_execute\t[^\t]*\tpublic\.app_a_member\(\)\t')
+
+    def test_storage_member_condition_is_not_bucket_only(self):
+        self.sql("create policy app_a_members_read on storage.objects for select to authenticated using (bucket_id = 'app-a-members' and public.app_a_is_member());")
+        self.assert_no_hit(self.scan(), 'storage_policy')
+        self.sql("create policy app_a_any_read on storage.objects for select to authenticated using (bucket_id = 'app-a-files');", filename='002.sql')
+        self.assert_hit(self.scan(), 'WARN', 'storage_policy')
+
     def test_catalog_zero(self):
         data = catalog_data()
         data.update(tables_total=0, tables=[])

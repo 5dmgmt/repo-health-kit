@@ -250,6 +250,11 @@ class Guard:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.allow = []
         self.expired_allows = []
+        # 本番カタログを見るときは、静的な「RLS 有効化が見つからない」を本番の結果と突き合わせてから出す
+        self.defer_rls = os.environ.get('RH_SUPABASE_CATALOG', '0') == '1'
+        self.deferred_rls = []
+        self.live_functions = None
+        self.live_views = None
         self.owners = []
         self.statements = 0
         self.load_allow()
@@ -468,7 +473,7 @@ def policy_risks(policy, shared):
             yield 'WARN', 'policy_open', '未ログインを含む無条件の方針です'
     if 'user_metadata' in sql.lower():
         yield 'WARN', 'user_metadata', '本人が書き換えられる user_metadata を方針が参照しています'
-    if policy['table'] == 'storage.objects' and (broad(using) or (using and 'bucket_id' in using.lower() and not re.search(r'auth\.|owner|select', using, re.I))):
+    if policy['table'] == 'storage.objects' and (broad(using) or (using and re.fullmatch(r"[\s()]*bucket_id\s*=\s*'[^']+'(?:::text)?[\s()]*", using, re.I))):
         yield 'WARN', 'storage_policy', 'Storage の方針が無条件またはバケットだけを条件にしています'
 
 
@@ -658,8 +663,12 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
             # 動的 SQL で有効化している「可能性」は、その表の名前を含むか、表の一覧を回す形のときだけ認める
             bare = re.escape(target.split('.')[-1])
             dynamic = any(re.search(r'\b' + bare + r'\b', block) or (re.search(r'\bfor\b[\s\S]*?\bin\b[\s\S]*?\bfrom\s+(?:pg_catalog\.)?(?:pg_tables|pg_class)\b|\bfor\b[\s\S]*?\bin\b[\s\S]*?information_schema\.tables', block) and re.search(r'format\s*\(|%i|quote_ident|\|\|', block)) for block in dynamic_blocks)
-            guard.finding('NOTE' if dynamic else 'WARN', 'rls_off', src.repo, target,
-                          'migration の記述上は RLS 有効化が見つかりません（本番は未確認）' + ('・動的 SQL で有効化している可能性' if dynamic else '') + ('・公開ロールへの GRANT もあります' if t['grant'] else ''), source=src)
+            args = ('NOTE' if dynamic else 'WARN', 'rls_off', src.repo, target,
+                    'migration の記述上は RLS 有効化が見つかりません（本番は未確認）' + ('・動的 SQL で有効化している可能性' if dynamic else '') + ('・公開ロールへの GRANT もあります' if t['grant'] else ''))
+            if guard.defer_rls:
+                guard.deferred_rls.append((args, {'source': src}))
+            else:
+                guard.finding(*args, source=src)
         guard.owner(src.repo, target, source=src)
     for (target, pn), p in policies.items():
         src = p['source']
@@ -675,7 +684,11 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
             guard.finding('WARN', 'tenant_boundary', src.repo, f'{target}:{pn}', 'migration の記述上は using にテナント列・所属の副問い合わせが見つかりません（本番は未確認）', source=src)
     for target, (src, material, invoker) in views.items():
         if target.startswith('public.') and (material or not invoker):
-            guard.finding('WARN', 'materialized_view' if material else 'view_owner', src.repo, target, 'migration の記述上は RLS が効かない VIEW の可能性があります（本番は未確認）', source=src)
+            args = ('WARN', 'materialized_view' if material else 'view_owner', src.repo, target, 'migration の記述上は RLS が効かない VIEW の可能性があります（本番は未確認）')
+            if guard.defer_rls:
+                guard.deferred_rls.append((args, {'source': src}))
+            else:
+                guard.finding(*args, source=src)
     for f in functions.values():
         target = f['name']
         src = f['source']
@@ -683,7 +696,11 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
             if not f['path']:
                 guard.finding('WARN', 'definer_path', src.repo, target, 'migration の記述上は DEFINER の search_path が未固定です（本番は未確認）', source=src)
             if not {'public', 'anon'} <= f['revoked']:
-                guard.finding('WARN', 'definer_execute', src.repo, target, 'migration の記述上は DEFINER の public・anon の EXECUTE 撤回が見つかりません（本番は未確認）', source=src)
+                args = ('WARN', 'definer_execute', src.repo, target, 'migration の記述上は DEFINER の public・anon の EXECUTE 撤回が見つかりません（本番は未確認）')
+                if guard.defer_rls:
+                    guard.deferred_rls.append((args, {'source': src}))
+                else:
+                    guard.finding(*args, source=src)
     for target, definitions in created.items():
         if len(definitions) > 1:
             different = len({frozenset(hashes) for hashes in definitions.values()}) > 1
@@ -909,7 +926,7 @@ tabs as (
  permissive='RESTRICTIVE' restrictive,
  regexp_replace(coalesce(case when cmd='INSERT' then with_check else qual end,'true'),'[[:space:]()]','','g') expr,
  regexp_replace(coalesce(with_check,qual,'true'),'[[:space:]()]','','g') check_expr,
- coalesce(qual,'') ~* 'bucket_id' bucket_only,
+ coalesce(qual,'') ~* '^[[:space:]()]*bucket_id[[:space:]]*=[[:space:]]*''[^'']+''(::text)?[[:space:]()]*$' bucket_only,
  coalesce(qual,'') ~* 'auth\.|owner|select' member_check,
  (coalesce(qual,'')||coalesce(with_check,'')) like '%user_metadata%' user_metadata,
  md5(coalesce(qual,'')||'|'||coalesce(with_check,'')||'|'||roles::text||'|'||cmd||'|'||permissive) hash
@@ -931,8 +948,9 @@ select jsonb_build_object(
  'functions',coalesce((select jsonb_agg(jsonb_build_object('target',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
  'search_path',exists(select 1 from unnest(p.proconfig) x where x like 'search_path=%'),
  'executable',has_function_privilege('anon',p.oid,'EXECUTE') or has_function_privilege('authenticated',p.oid,'EXECUTE'),
+ 'anon',has_function_privilege('anon',p.oid,'EXECUTE'),
  'hash',left(md5(pg_get_functiondef(p.oid)),12))) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where p.prosecdef and p.prokind='f' and n.nspname in (select n from exposed)),'[]'::jsonb),
+ where p.prosecdef and p.prokind='f' and p.prorettype <> 'trigger'::regtype and n.nspname in (select n from exposed)),'[]'::jsonb),
  'buckets',coalesce((select jsonb_agg(jsonb_build_object('target',name,'public',public)) from storage.buckets),'[]'::jsonb),
  'realtime',coalesce((select jsonb_agg(jsonb_build_object('target',schemaname||'.'||tablename)) from pg_publication_tables where pubname='supabase_realtime'),'[]'::jsonb),
  'schemas',coalesce((select jsonb_agg(n) from exposed),'[]'::jsonb)
@@ -970,7 +988,10 @@ def catalog_findings(data, shared):
             add('WARN', 'view_owner', v['target'], '公開ロールが RLS を引き継がない VIEW を読めます', v['hash'])
     for f in data['functions']:
         if f['executable']:
-            add('WARN', 'definer_execute', f['target'], '公開ロールが SECURITY DEFINER 関数を実行できます', f['hash'])
+            if f.get('anon', True):
+                add('WARN', 'definer_execute', f['target'], '未ログイン（anon）でも SECURITY DEFINER 関数を実行できます。中で本人か管理者かを確かめているか見てください', f['hash'])
+            else:
+                add('INFO', 'definer_authenticated', f['target'], 'ログインした人が SECURITY DEFINER 関数を実行できます（共有プロジェクトでは別のアプリの人も含みます。中で本人・所属を確かめているか、人が確かめてください）', f['hash'])
             if not f['search_path']:
                 add('WARN', 'definer_path', f['target'], '実行可能な DEFINER の search_path が未固定です', f['hash'])
     for b in data['buckets']:
@@ -1026,12 +1047,17 @@ def catalog(ref: str, repos: list[Repo], tables, guard: Guard):
         for kind, count in sorted(unchanged.items()):
             guard.emit('INFO', 'catalog_unchanged', label, masked, f'前日から変わらない {kind} {count}件')
         live_tables = {}
+        guard.live_functions = (guard.live_functions or set()) | {f['target'].split('(')[0] for f in data['functions']}
+        guard.live_views = (guard.live_views or set()) | {v['target'] for v in data.get('views', [])}
         for t in data['tables']:
             target = t['target']
             live_tables[target] = bool(t['rls'])
             guard.owner(label, target)
-            if target in tables and tables[target]['rls'] != bool(t['rls']):
-                guard.emit('FAIL', 'catalog_drift', label, target, 'migration と本番で RLS の有効・無効が食い違います')
+            if target in tables and 'rls' in tables[target] and tables[target]['rls'] != bool(t['rls']):
+                if tables[target]['rls'] and not t['rls']:
+                    guard.emit('FAIL', 'catalog_drift', label, target, 'migration では RLS が有効なのに、本番では無効です')
+                else:
+                    guard.emit('NOTE', 'catalog_drift', label, target, '本番は RLS 有効・migration に有効化の記述がありません（SQL Editor か動的 SQL で当てた可能性）')
         snapshot['current'] = current
         snapshot['tables'] = live_tables
         guard.save('catalog:' + ref, snapshot)
@@ -1284,6 +1310,7 @@ def main():
     for repo in repos:
         if not repo.refs:
             static_group([repo], guard, False)
+    live_rls = {}
     if os.environ.get('RH_SUPABASE_CATALOG', '0') == '1':
         refs = os.environ.get('RH_SUPABASE_CATALOG_REFS', '').split()
         if not refs:
@@ -1293,10 +1320,34 @@ def main():
                 guard.emit('WARN', 'catalog_unchecked', '-', '-', '本番カタログの ref の形式が不正です（未検査）')
                 continue
             live = catalog(ref, ref_groups[ref], group_tables.get(ref, {}), guard)
+            live_rls.update({k: v for k, v in (live or {}).items()})
             for target in live:
                 group_tables.setdefault(ref, {}).setdefault(target, {})
     else:
         guard.emit('NOTE', 'catalog_disabled', '-', '-', '本番カタログは既定オフです（本番は未確認）')
+    for args, kwargs in guard.deferred_rls:
+        kind, target = args[1], args[3]
+        if live_rls and kind == 'rls_off':
+            # 本番で RLS 有効と確かめられた表は出さない（食い違いの NOTE が代わりに出る）。本番に無い表は注記だけ
+            if live_rls.get(target) is True:
+                continue
+            if target not in live_rls:
+                guard.finding('NOTE', 'rls_off', args[2], target, 'migration にだけある表です（本番には表がありません）', **kwargs)
+                continue
+        if guard.live_functions is not None and kind == 'definer_execute':
+            # 本番の権限が正本。本番にある関数は本番の結果（WARN か参考）に任せ、無い関数は注記だけ
+            if target in guard.live_functions:
+                continue
+            guard.finding('NOTE', 'definer_execute', args[2], target, 'migration にだけある関数です（本番には関数がありません）', **kwargs)
+            continue
+        if guard.live_views is not None and kind in ('view_owner', 'materialized_view'):
+            # 本番の VIEW の権限が正本。本番にある VIEW は本番の結果に任せ、無いものは注記だけ
+            if target in guard.live_views:
+                continue
+            guard.finding('NOTE', kind, args[2], target, 'migration にだけある VIEW です（本番には VIEW がありません）', **kwargs)
+            continue
+        guard.finding(*args, **kwargs)
+    guard.deferred_rls = []
     if os.environ.get('RH_SUPABASE_ANON_PROBE', '0') == '1':
         probed = set()
         for repo in repos:
