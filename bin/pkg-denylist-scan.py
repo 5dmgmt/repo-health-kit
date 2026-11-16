@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""追跡済み npm/Python の lock を既知の侵害パッケージ一覧と照合します。
+"""JavaScript/Python の lock を既知の侵害パッケージ一覧と照合します。
 
 照合リストの形式: 名前<TAB>版<TAB>出典・理由
 - 版の列が `*` の行は「その名前なら全版が対象」です。
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -20,6 +21,9 @@ from typing import Iterator
 DEFAULT_DENYLIST = Path(__file__).resolve().parent.parent / "config" / "pkg-denylist.tsv"
 DEFAULT_ROOT = Path.home() / "Plugins"
 PYTHON_LOCK_NAMES = {"poetry.lock", "uv.lock", "Pipfile.lock"}
+NPM_LOCK_NAMES = {
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"
+}
 PYPI_PREFIX = "pypi:"
 ANY_VERSION = "*"
 
@@ -57,7 +61,7 @@ def load_denylist(path: Path) -> dict[str, dict[tuple[str, str], str]]:
 def tracked_lockfiles(repo: Path) -> list[tuple[Path, str]]:
     """照合する lock の一覧です。
 
-    npm: 今までどおり、ルートの package-lock.json（追跡の有無によらず）と、追跡中の入れ子の package-lock.json。
+    npm: ルートの lock（追跡の有無によらず）と、追跡中の入れ子の lock。
     Python: 追跡中（git ls-files）の requirements*.txt・poetry.lock・uv.lock・Pipfile.lock だけ。
     """
     found: list[tuple[Path, str]] = []
@@ -68,10 +72,12 @@ def tracked_lockfiles(repo: Path) -> list[tuple[Path, str]]:
             seen.add(lockfile)
             found.append((lockfile, ecosystem))
 
-    add(repo / "package-lock.json", "npm")
+    for lock_name in sorted(NPM_LOCK_NAMES):
+        add(repo / lock_name, "npm")
     try:
         result = subprocess.run(
-            ["git", "-c", "core.quotepath=false", "ls-files", "-z"],
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.sshCommand=ssh", "-c", "core.quotepath=false", "ls-files", "-z"],
             cwd=repo,
             capture_output=True,
             timeout=30,
@@ -87,7 +93,7 @@ def tracked_lockfiles(repo: Path) -> list[tuple[Path, str]]:
             path = Path(rel)
             if "node_modules" in path.parts:
                 continue
-            if path.name == "package-lock.json":
+            if path.name in NPM_LOCK_NAMES:
                 add(repo / path, "npm")
             elif path.name in PYTHON_LOCK_NAMES or (
                 path.name.startswith("requirements") and path.suffix == ".txt"
@@ -99,24 +105,35 @@ def tracked_lockfiles(repo: Path) -> list[tuple[Path, str]]:
 
 
 def npm_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
-    try:
-        data = json.loads(lockfile.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+    if lockfile.name == "pnpm-lock.yaml":
+        yield from pnpm_packages(lockfile)
         return
+    if lockfile.name == "yarn.lock":
+        yield from yarn_packages(lockfile)
+        return
+    if lockfile.name == "bun.lock":
+        yield from bun_packages(lockfile)
+        return
+    data = json.loads(lockfile.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("lock の最上位が object ではありません")
 
-    packages = data.get("packages") or {}
-    if isinstance(packages, dict):
-        for package_path, info in packages.items():
-            if not package_path or not isinstance(info, dict):
-                continue
-            name = info.get("name") or package_path.split("node_modules/")[-1]
-            version = info.get("version")
-            if isinstance(name, str) and isinstance(version, str):
-                yield name, version
+    packages = data.get("packages", {})
+    if not isinstance(packages, dict):
+        raise ValueError("packages が object ではありません")
+    for package_path, info in packages.items():
+        if not package_path or not isinstance(info, dict):
+            continue
+        name = info.get("name") or package_path.split("node_modules/")[-1]
+        version = info.get("version")
+        if isinstance(name, str) and isinstance(version, str):
+            yield name, version
 
     def walk(dependencies: object) -> Iterator[tuple[str, str]]:
-        if not isinstance(dependencies, dict):
+        if dependencies is None:
             return
+        if not isinstance(dependencies, dict):
+            raise ValueError("dependencies が object ではありません")
         for name, info in dependencies.items():
             if not isinstance(name, str) or not isinstance(info, dict):
                 continue
@@ -128,14 +145,136 @@ def npm_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
     yield from walk(data.get("dependencies"))
 
 
+def resolved_package(value: str) -> tuple[str, str] | None:
+    """name@version / @scope/name@version を、peer の付記を除いて読みます。"""
+    match = re.fullmatch(r"(@[^/@\s]+/[^/@\s]+|[^/@\s]+)@(?:npm:)?([0-9][^()\s]*)[()\s]?.*", value)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def pnpm_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
+    lines = lockfile.read_text(encoding="utf-8").splitlines()
+    in_packages = False
+    saw_packages = False
+    key_indent = 0
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw.startswith((" ", "\t")):
+            in_packages = bool(re.fullmatch(r"packages:\s*(?:\{\})?\s*(?:#.*)?", raw))
+            saw_packages = saw_packages or in_packages
+            key_indent = 0
+            continue
+        if not in_packages:
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if not key_indent:
+            key_indent = indent
+        if indent != key_indent:
+            continue
+        match = re.match(r"\s*(?:'([^']+)'|\"([^\"]+)\"|([^\s]+?)):\s*(?:\{\})?\s*(?:#.*)?$", raw)
+        if not match:
+            raise ValueError("packages のキーを読めません")
+        key = next(part for part in match.groups() if part is not None).lstrip("/")
+        package = resolved_package(key)
+        if package is None:
+            # 古い pnpm の /name/version と /@scope/name/version も扱います。
+            legacy = re.fullmatch(r"(.+)/([0-9][^()\s]*)(?:\(.*\))?", key)
+            package = (legacy.group(1), legacy.group(2)) if legacy else None
+        if package is None:
+            raise ValueError("packages の名前と版を読めません")
+        yield package
+    if not saw_packages and not any(re.fullmatch(r"(?:importers|dependencies|devDependencies):\s*\{\}", line) for line in lines):
+        raise ValueError("packages の一覧がありません")
+
+
+def yarn_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
+    lines = lockfile.read_text(encoding="utf-8").splitlines()
+    names: list[str] = []
+    version = ""
+    resolution = ""
+    saw_entry = False
+
+    def entry() -> Iterator[tuple[str, str]]:
+        package = resolved_package(resolution) if resolution else None
+        if package:
+            yield package
+        elif version:
+            for name in names:
+                yield name, version
+        elif names:
+            raise ValueError("yarn の版を読めません")
+
+    for raw in [*lines, "__end__:"]:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw.startswith((" ", "\t")):
+            yield from entry()
+            names = []
+            version = ""
+            resolution = ""
+            if not raw.rstrip().endswith(":"):
+                raise ValueError("yarn の見出しを読めません")
+            key = raw.rstrip()[:-1].strip().strip("\"'")
+            if key in {"__metadata", "__end__"}:
+                continue
+            # v1 の複数 selector と berry の npm:/patch: などの selector。
+            for selector in re.split(r"\s*,\s*", key):
+                match = re.match(r"[\"']?(@[^/@\s]+/[^/@\s]+|[^/@\s]+)@", selector)
+                if match:
+                    names.append(match.group(1))
+            if not names:
+                raise ValueError("yarn の名前を読めません")
+            saw_entry = True
+            continue
+        match = re.match(r"\s*(version|resolution)(?:\s+|:\s*)[\"']?([^\"'\s]+)", raw)
+        if match:
+            if match.group(1) == "version":
+                version = match.group(2)
+            else:
+                resolution = match.group(2)
+    if not saw_entry and not any("yarn lockfile v1" in line or line.startswith("__metadata:") for line in lines):
+        raise ValueError("yarn の一覧がありません")
+
+
+def bun_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
+    """bun のテキスト lock のコメント・末尾カンマを、文字列を保って除きます。"""
+    raw = lockfile.read_text(encoding="utf-8")
+    strings = r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"""
+    comments = re.compile(strings + r"|//[^\n]*|/\*[\s\S]*?\*/")
+    text = comments.sub(lambda match: match.group() if match.group().startswith(('"', "'")) else " ", raw)
+    keys = re.compile(strings + r"|([A-Za-z_$][A-Za-z0-9_$]*)\s*:")
+
+    def json_token(match: re.Match[str]) -> str:
+        token = match.group()
+        if token.startswith("'"):
+            return json.dumps(ast.literal_eval(token))
+        if token.startswith('"'):
+            return token
+        return json.dumps(match.group(1)) + ":"
+
+    text = keys.sub(json_token, text)
+    commas = re.compile(r'"(?:[^"\\]|\\.)*"|,\s*(?=[}\]])')
+    text = commas.sub(lambda match: match.group() if match.group().startswith('"') else "", text)
+    data = json.loads(text)
+    if not isinstance(data, dict) or not isinstance(data.get("packages"), dict):
+        raise ValueError("bun の packages がありません")
+    for info in data["packages"].values():
+        if not isinstance(info, list) or not info or not isinstance(info[0], str):
+            raise ValueError("bun の名前と版を読めません")
+        package = resolved_package(info[0])
+        if package:
+            yield package
+        elif not any(marker in info[0] for marker in ("@workspace:", "@file:", "@link:", "@git", "@https:")):
+            raise ValueError("bun の名前と版を読めません")
+
+
 def requirements_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
     pattern = re.compile(
         r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^]]+\])?\s*===?\s*([^\s;#\\]+)"
     )
-    try:
-        lines = lockfile.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return
+    lines = lockfile.read_text(encoding="utf-8").splitlines()
     for line in lines:
         match = pattern.match(line)
         if match:
@@ -144,10 +283,7 @@ def requirements_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
 
 def toml_lock_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
     """poetry.lock / uv.lock の [[package]] ごとの name と version を読みます。"""
-    try:
-        lines = lockfile.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return
+    lines = lockfile.read_text(encoding="utf-8").splitlines()
     name = ""
     version = ""
     in_package = False
@@ -174,14 +310,13 @@ def toml_lock_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
 
 
 def pipfile_packages(lockfile: Path) -> Iterator[tuple[str, str]]:
-    try:
-        data = json.loads(lockfile.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return
+    data = json.loads(lockfile.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("lock の最上位が object ではありません")
     for section in ("default", "develop"):
         packages = data.get(section, {})
         if not isinstance(packages, dict):
-            continue
+            raise ValueError("Pipfile の一覧が object ではありません")
         for name, info in packages.items():
             if not isinstance(name, str) or not isinstance(info, dict):
                 continue
@@ -209,7 +344,15 @@ def scan_repo(
             relative = lockfile.relative_to(repo).as_posix()
         except ValueError:
             relative = lockfile.as_posix()
-        packages = npm_packages(lockfile) if ecosystem == "npm" else python_packages(lockfile)
+        if lockfile.name == "bun.lockb":
+            hits.append(f"DENYWARN|{safe_field(name)}|{safe_field(relative)}|未照合（bun.lockb のバイナリ形式）")
+            continue
+        try:
+            # generator の読取エラーも、この lock の中だけに閉じ込めます。
+            packages = list(npm_packages(lockfile) if ecosystem == "npm" else python_packages(lockfile))
+        except (OSError, UnicodeError, ValueError, SyntaxError, TypeError, AttributeError, RecursionError):
+            hits.append(f"DENYSKIP|{safe_field(name)}|{safe_field(relative)}（lock を読めません・形式不正）")
+            continue
         for raw_package, version in packages:
             package = pep503_name(raw_package) if ecosystem == "pypi" else raw_package
             reason = denylist[ecosystem].get((package, version))

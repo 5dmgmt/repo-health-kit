@@ -8,6 +8,7 @@ set -uo pipefail
 TEST_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_DIR="$(unset CDPATH; cd -- "$TEST_DIR/.." && pwd)"
 HEALTH="$PROJECT_DIR/bin/repo-health.sh"
+TEST_BASH="${RH_TEST_BASH:-/bin/bash}"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/repo-health-tests.XXXXXX")" || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
@@ -20,17 +21,17 @@ fail() { total=$((total + 1)); failed=$((failed + 1)); printf 'not ok %s - %s\n'
 
 assert_contains() {
   local description="$1" file="$2" pattern="$3"
-  if LC_ALL=C grep -qE "$pattern" "$file"; then pass "$description"; else fail "$description"; sed -n '1,120p' "$file"; fi
+  if LC_ALL=C grep -qE -- "$pattern" "$file"; then pass "$description"; else fail "$description"; sed -n '1,120p' "$file"; fi
 }
 
 assert_not_contains() {
   local description="$1" file="$2" pattern="$3"
-  if LC_ALL=C grep -qE "$pattern" "$file"; then fail "$description"; sed -n '1,120p' "$file"; else pass "$description"; fi
+  if LC_ALL=C grep -qE -- "$pattern" "$file"; then fail "$description"; sed -n '1,120p' "$file"; else pass "$description"; fi
 }
 
 assert_count() {
   local description="$1" file="$2" pattern="$3" expected="$4" actual
-  actual="$(LC_ALL=C grep -cE "$pattern" "$file" || true)"
+  actual="$(LC_ALL=C grep -cE -- "$pattern" "$file" || true)"
   if [ "$actual" = "$expected" ]; then pass "$description"; else fail "$description"; sed -n '1,160p' "$file"; fi
 }
 
@@ -60,7 +61,7 @@ run_health() {
   RH_STATE_DIR="$case_dir/state" \
   RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
   RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
-    bash "$HEALTH" > "$output" 2>&1 || true
+    "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
 }
 
 run_security() {
@@ -76,9 +77,9 @@ run_security() {
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
     RH_SKIP_SOFTWARE=1 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
-    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
+    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS="$case_dir/no-apps" RH_BREW="$fake_bin/brew" \
     RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= RH_BUN_CANDIDATES= \
-    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+    "$@" "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
 }
 
 run_security_only() {
@@ -91,54 +92,117 @@ run_security_only() {
     RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
     RH_SECURITY_ONLY=1 RH_SKIP_SECURITY=1 RH_SKIP_CLI=0 RH_SKIP_FETCH=0 \
     RH_AUTOFIX_PULL=1 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
-    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+    "$@" "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
 }
 
 make_fake_brew() {
   local fake_bin="$1"
   mkdir -p "$fake_bin"
-  {
-    printf '%s\n' '#!/bin/bash'
-    cat <<'SH'
-fix_node_kegs() {
+  cat > "$fake_bin/brew" <<'SH'
+#!/bin/bash
+fix_kegs() {
   [ -n "${FAKE_BREW_FIX_ON-}" ] && [ "${FAKE_BREW_FIX_ON}" = "$1" ] || return 0
   shift
   for formula in "$@"; do
-    case "$formula" in
-      node|node@[0-9]*) rm -f "${FAKE_BREW_STATE_DIR:?}/$formula.broken" ;;
-    esac
+    rm -f "${FAKE_BREW_STATE_DIR:?}/$formula.broken"
   done
 }
-SH
-    printf '%s\n' 'case "${1:-}" in'
-    printf '%s\n' '  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;'
-    printf '%s\n' '  outdated) if [ -n "${FAKE_BREW_AFTER_JSON-}" ] && [ -s "${FAKE_BREW_LOG:-/dev/null}" ]; then printf "%s\n" "$FAKE_BREW_AFTER_JSON"; elif [ -n "${FAKE_BREW_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi ;;'
-    printf '%s\n' '  info) if [ "${2:-}" = "--cask" ]; then if [ -n "${FAKE_BREW_CASK_INFO_JSON-}" ]; then printf "%s\n" "$FAKE_BREW_CASK_INFO_JSON"; else printf "%s\n" '\''{"formulae":[],"casks":[]}'\''; fi; else exit 1; fi ;;'
-    printf '%s\n' '  upgrade) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; printf "deps-check=%s\n" "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "${FAKE_BREW_LOG:?}"; printf "cleanup=%s\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" >> "${FAKE_BREW_LOG:?}"; fix_node_kegs "$@"; exit "${FAKE_BREW_UPGRADE_RC:-0}" ;;'
-    printf '%s\n' '  reinstall) printf "%s\n" "$*" >> "${FAKE_BREW_LOG:?}"; fix_node_kegs "$@"; exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;'
-    cat <<'SH'
+case "${1:-}" in
+  update) exit "${FAKE_BREW_UPDATE_RC:-0}" ;;
+  outdated)
+    if [ -n "${FAKE_BREW_AFTER_JSON-}" ] && [ -s "${FAKE_BREW_LOG:-/dev/null}" ]; then
+      printf '%s\n' "$FAKE_BREW_AFTER_JSON"
+    else
+      python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+raw = os.environ.get("FAKE_BREW_JSON", '{"formulae":[],"casks":[]}')
+try:
+    data = json.loads(raw)
+    updated = Path(os.environ.get("FAKE_BREW_LOG", "/nonexistent") + ".updated")
+    names = set(updated.read_text().splitlines()) if updated.is_file() else set()
+    data["formulae"] = [f for f in data.get("formulae", []) if f.get("name") not in names]
+    print(json.dumps(data))
+except (ValueError, TypeError):
+    print(raw)
+PY
+    fi ;;
+  info)
+    if [ "${2:-}" = --cask ]; then
+      if [ -n "${FAKE_BREW_CASK_INFO_JSON-}" ]; then printf '%s\n' "$FAKE_BREW_CASK_INFO_JSON";
+      else printf '%s\n' '{"formulae":[],"casks":[]}'; fi
+    else exit 1; fi ;;
+  upgrade|reinstall)
+    printf '%s\n' "$*" >> "${FAKE_BREW_LOG:?}"
+    printf 'deps-check=%s\n' "${HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK:-}" >> "$FAKE_BREW_LOG"
+    printf 'cleanup=%s\n' "${HOMEBREW_NO_INSTALL_CLEANUP:-}" >> "$FAKE_BREW_LOG"
+    fix_kegs "$@"
+    if [ "$1" = upgrade ]; then
+      if [ "${FAKE_BREW_UPGRADE_RC:-0}" = 0 ]; then
+        for formula in "${@:2}"; do
+          case "$formula" in --*) continue;; esac
+          printf '%s\n' "$formula" >> "$FAKE_BREW_LOG.updated"
+        done
+      fi
+      if [ -n "${FAKE_BREW_BREAK_AFTER_UPGRADE-}" ] && [ "$*" = 'upgrade node@24' ]; then
+        printf 'all\n' > "$FAKE_BREW_STATE_DIR/$FAKE_BREW_BREAK_AFTER_UPGRADE.broken"
+      fi
+      exit "${FAKE_BREW_UPGRADE_RC:-0}"
+    fi
+    exit "${FAKE_BREW_REINSTALL_RC:-0}" ;;
   list)
-    if [ "${2:-}" = "--formula" ] && [ "${3:-}" = "-1" ]; then
+    [ "${FAKE_BREW_LIST_RC:-0}" = 0 ] || exit "$FAKE_BREW_LIST_RC"
+    if [ "${2:-}" = --pinned ]; then
+      printf '%b' "${FAKE_BREW_PINNED-}"
+    elif [ "${2:-}" = --formula ] && [ "${3:-}" = -1 ]; then
       printf '%s\n' "${FAKE_BREW_FORMULAE-}"
     else
       versions="${FAKE_BREW_VERSIONS-}"
-      if [ -n "${FAKE_BREW_FIXED_VERSIONS-}" ] && [ ! -f "${FAKE_BREW_STATE_DIR:?}/${3:-}.broken" ]; then
+      if [ -n "${FAKE_BREW_SNAPSHOT_AFTER-}" ] && [ -s "${FAKE_BREW_LOG:-/dev/null}" ]; then
+        versions="$FAKE_BREW_SNAPSHOT_AFTER"
+      elif [ -n "${FAKE_BREW_FIXED_VERSIONS-}" ] \
+        && { { [ -n "${3:-}" ] && [ ! -f "${FAKE_BREW_STATE_DIR:?}/$3.broken" ]; } \
+          || { [ -z "${3:-}" ] && ! compgen -G "${FAKE_BREW_STATE_DIR:?}/*.broken" >/dev/null; }; }; then
         versions="$FAKE_BREW_FIXED_VERSIONS"
       fi
-      printf '%b' "$versions" | while IFS= read -r line; do
-        case "$line" in "${3:-} "*) printf '%s\n' "$line";; esac
-      done
+      FAKE_VERSIONS="$versions" python3 - "${3:-}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+versions = os.environ.get("FAKE_VERSIONS", "").replace("\\n", "\n")
+try:
+    data = json.loads(os.environ.get("FAKE_BREW_JSON", "{}"))
+except ValueError:
+    data = {}
+if not versions:
+    versions = "\n".join(str(f.get("name")) + " " + " ".join(f.get("installed_versions", [])) for f in data.get("formulae", []))
+updated_path = Path(os.environ.get("FAKE_BREW_LOG", "/nonexistent") + ".updated")
+updated = set(updated_path.read_text().splitlines()) if updated_path.is_file() else set()
+latest = {f.get("name"): f.get("current_version") for f in data.get("formulae", [])}
+for line in versions.splitlines():
+    name = line.split(" ", 1)[0]
+    if name in updated and latest.get(name) and not os.environ.get("FAKE_BREW_SNAPSHOT_AFTER") and not os.environ.get("FAKE_BREW_FIXED_VERSIONS"):
+        line = name + " " + latest[name]
+    if not sys.argv[1] or name == sys.argv[1]:
+        print(line)
+PY
     fi ;;
+  uses) printf '%b\n' "${FAKE_BREW_USES-}" ;;
+  deps) printf '%b\n' "${FAKE_BREW_DEPS-}" ;;
+  linkage)
+    printf '%s\n' "$*" >> "${FAKE_BREW_LINKAGE_LOG:-/dev/null}"
+    [ -z "${FAKE_BREW_LINKAGE_SLEEP-}" ] || sleep "$FAKE_BREW_LINKAGE_SLEEP"
+    [ ! -f "${FAKE_BREW_STATE_DIR:-/nonexistent}/${3:-}.broken" ] ;;
   --prefix)
     if [ -n "${2:-}" ]; then
+      [ "${FAKE_BREW_PREFIX_RC:-0}" = 0 ] || exit "$FAKE_BREW_PREFIX_RC"
       printf '%s/opt/%s\n' "${FAKE_BREW_PREFIX:-/fake/homebrew}" "$2"
-    else
-      printf '%s\n' "${FAKE_BREW_PREFIX:-/fake/homebrew}"
-    fi ;;
+    else printf '%s\n' "${FAKE_BREW_PREFIX:-/fake/homebrew}"; fi ;;
+  *) exit 1 ;;
+esac
 SH
-    printf '%s\n' '  *) exit 1 ;;'
-    printf '%s\n' 'esac'
-  } > "$fake_bin/brew"
   chmod +x "$fake_bin/brew"
 }
 
@@ -152,6 +216,11 @@ make_fake_node_keg() {
 formula="${0%/bin/node}"
 formula="${formula##*/}"
 printf '%s %s\n' "$formula" "${1:-}" >> "${FAKE_NODE_KEG_LOG:?}"
+if [ "${FAKE_NODE_TRANSIENT_FORMULA-}" = "$formula" ] && [ "${1:-}" = --version ] \
+  && [ ! -f "$FAKE_BREW_STATE_DIR/$formula.transient-tried" ]; then
+  : > "$FAKE_BREW_STATE_DIR/$formula.transient-tried"
+  exit 134
+fi
 if [ -f "${FAKE_BREW_STATE_DIR:?}/$formula.broken" ]; then
   mode="$(cat "$FAKE_BREW_STATE_DIR/$formula.broken")"
   if [ "$mode" != "js" ] || [ "${1:-}" != "--version" ]; then exit 134; fi
@@ -289,10 +358,10 @@ run_composer() {
     RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
     RH_SKIP_AUDIT=0 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
     RH_COMPOSER_PATH="$composer_path" RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none \
-    RH_NOMAIL=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$output" 2>&1 || true
+    RH_NOMAIL=1 RH_NO_DESKTOP=1 "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
 }
 
-printf '1..275\n'
+# 件数は末尾で表示します。
 
 case_dir="$TEST_TMP/clean"
 mkdir -p "$case_dir"
@@ -403,14 +472,14 @@ case_dir="$TEST_TMP/unsafe-config"
 mkdir -p "$case_dir/home/.config/repo-health-kit" "$case_dir/root"
 printf 'RH_MAIL_METHOD="none"\n' > "$case_dir/home/.config/repo-health-kit/config.sh"
 chmod 666 "$case_dir/home/.config/repo-health-kit/config.sh"
-HOME="$case_dir/home" RH_ROOTS="$case_dir/root" RH_SKIP_CLI=1 RH_NO_DESKTOP=1 bash "$HEALTH" > "$case_dir/output.txt" 2>&1
+HOME="$case_dir/home" RH_ROOTS="$case_dir/root" RH_SKIP_CLI=1 RH_NO_DESKTOP=1 "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1
 unsafe_rc=$?
 if [ "$unsafe_rc" -ne 0 ]; then pass '権限666の設定ファイルは停止する'; else fail '権限666の設定ファイルは停止する'; fi
 assert_contains '危険な設定ファイルを読まない理由を表示' "$case_dir/output.txt" '権限が安全でないため読みません'
 
 case_dir="$TEST_TMP/test-mail"
 mkdir -p "$case_dir/home"
-HOME="$case_dir/home" RH_MAIL_METHOD=none bash "$HEALTH" --test-mail > "$case_dir/output.txt" 2>&1
+HOME="$case_dir/home" RH_MAIL_METHOD=none "$TEST_BASH" "$HEALTH" --test-mail > "$case_dir/output.txt" 2>&1
 assert_contains '--test-mail と none は送信しない' "$case_dir/output.txt" 'none のため送信しない'
 
 case_dir="$TEST_TMP/install"
@@ -460,7 +529,7 @@ run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"}]}'
 assert_contains 'ca-certificates は既定で brew upgrade する' "$case_dir/brew.log" '^upgrade ca-certificates$'
 assert_contains 'ca-certificates の更新は依存する別の部品を巻き込まない' "$case_dir/brew.log" '^deps-check=1$'
-assert_contains 'ca-certificates の更新を自動修復へ出す' "$case_dir/output.txt" 'ca-certificates .*2026-09-25 → 2026-10-20 を自動更新'
+assert_contains 'ca-certificates の更新を自動修復へ出す' "$case_dir/output.txt" 'Homebrew: ca-certificates 2026-09-25 → 2026-10-20'
 assert_not_contains 'ca-certificates の自動更新成功時は更新 WARN を出さない' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
 
 case_dir="$TEST_TMP/security-node-manual"
@@ -470,8 +539,8 @@ make_fake_brew "$fake_bin"
 run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_LOG="$case_dir/brew.log" \
   FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"}]}'
-assert_contains 'ca-certificates と node のうち ca は自動更新する' "$case_dir/output.txt" 'ca-certificates .*を自動更新'
-assert_contains 'RH_AUTOFIX_SECURITY=0 では node を WARN にする' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0'
+assert_contains 'ca-certificates と node のうち ca は自動更新する' "$case_dir/output.txt" 'Homebrew: ca-certificates '
+assert_contains 'RH_AUTOFIX_SECURITY=0 では node を WARN にする' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: .*node 26\.11\.1 → 26\.12\.0'
 
 case_dir="$TEST_TMP/security-node-software-dedupe"
 fake_bin="$case_dir/fake-bin"
@@ -484,7 +553,7 @@ run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_CA_CERTS=0 RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
   RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
   FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
-assert_contains 'セキュリティ部品の WARN はそのまま出す' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0'
+assert_contains 'セキュリティ部品の WARN はそのまま出す' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: .*node 26\.11\.1 → 26\.12\.0'
 assert_not_contains 'WARN 済みのセキュリティ部品はソフト更新に重ねない' "$case_dir/output.txt" 'ソフト更新: Homebrew node'
 assert_not_contains 'WARN 済みのセキュリティ部品はソフト側で自動更新しない' "$case_dir/brew.log" 'upgrade --formula .*node'
 assert_contains 'セキュリティ部品以外の formula はソフト側で自動更新する' "$case_dir/brew.log" 'upgrade --formula rclone'
@@ -497,7 +566,7 @@ run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SECURITY=1 \
   FAKE_BREW_JSON='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"}]}'
 assert_contains 'RH_AUTOFIX_SECURITY=1 では node も brew upgrade する' "$case_dir/brew.log" '^upgrade node$'
-assert_contains 'node の更新を自動修復へ出す' "$case_dir/output.txt" 'node .*26\.11\.1 → 26\.12\.0 を自動更新'
+assert_contains 'node の更新を自動修復へ出す' "$case_dir/output.txt" 'Homebrew: node 26\.11\.1 → 26\.12\.0'
 assert_not_contains 'node の自動更新成功時は更新 WARN を出さない' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
 
 # node の健康な keg と壊れた keg を分け、修復設定ごとの動きを確かめる。
@@ -550,13 +619,13 @@ for scenario in upgrade reinstall none manual js security wrong-output nonzero; 
   case "$scenario" in
     none|manual|wrong-output|nonzero)
       assert_contains "$scenario: 不健康な node@24 は WARN" "$case_dir/output.txt" 'WARN  Homebrew の node@24 が起動しません'
-      assert_not_contains "$scenario: 修復成功とは報告しない" "$case_dir/output.txt" 'Homebrew: node@24 '
+      assert_not_contains "$scenario: 修復成功とは報告しない" "$case_dir/output.txt" 'Homebrew: node@24 .*を入れ直し'
       ;;
     *)
       assert_contains "$scenario: node@24 の修復を AUTOFIXED に載せる" "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3'
       assert_not_contains "$scenario: 直った node@24 の起動 WARN は出さない" "$case_dir/output.txt" 'WARN  Homebrew の node@24 が起動しません'
       if [ "$scenario" = reinstall ]; then
-        assert_contains '前後の版が同じなら入れ直しと報告する' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 を入れ直し'
+        assert_contains '前後の版が同じなら入れ直しと報告する' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3( を入れ直し| → 24\.22\.3_1)'
       else
         assert_contains "$scenario: brew の前後の版を報告する" "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 → 24\.22\.3_1'
       fi ;;
@@ -571,13 +640,12 @@ for scenario in upgrade reinstall none manual js security wrong-output nonzero; 
 done
 
 # 元の文面を保って WARN の一部・全部を除き、巻き込み更新にも追従する。
-for scenario in partial all repaired-still-listed invalid-json incidental; do
+for scenario in partial all repaired-still-listed invalid-json; do
   case_dir="$TEST_TMP/node-keg-warning-$scenario"
   fake_bin="$case_dir/fake-bin"
   make_fake_brew "$fake_bin"
   make_fake_node_keg "$case_dir" node
   broken=all
-  [ "$scenario" != incidental ] || broken=""
   make_fake_node_keg "$case_dir" node@24 "$broken"
   make_fake_software_npm "$fake_bin"
   printf '[]\n' > "$case_dir/catalog.json"
@@ -588,10 +656,21 @@ for scenario in partial all repaired-still-listed invalid-json incidental; do
   brew_json='{"formulae":[{"name":"ca-certificates","installed_versions":["2026-09-25"],"current_version":"2026-10-20"},{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"node@24","installed_versions":["24.22.3"],"current_version":"24.22.3_1"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
   after_json='{"formulae":[{"name":"node","installed_versions":["26.11.1"],"current_version":"26.12.0"},{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}'
   case "$scenario" in
-    all|incidental) after_json='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}' ;;
+    all) after_json='{"formulae":[{"name":"rclone","installed_versions":["1.74.3"],"current_version":"1.75.2"}],"casks":[]}' ;;
     repaired-still-listed) after_json="$brew_json" ;;
     invalid-json) after_json='{"formulae":null}' ;;
   esac
+  if [ "$scenario" != invalid-json ]; then
+    after_json="$(python3 - "$after_json" <<'PYJSON'
+import json
+import sys
+data = json.loads(sys.argv[1])
+if not any(f.get("name") == "ca-certificates" for f in data["formulae"]):
+    data["formulae"].insert(0, {"name": "ca-certificates", "installed_versions": ["2026-09-25"], "current_version": "2026-10-20"})
+print(json.dumps(data))
+PYJSON
+)"
+  fi
   run_security "$case_dir" "$fake_bin" \
     FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
     FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
@@ -600,31 +679,36 @@ for scenario in partial all repaired-still-listed invalid-json incidental; do
     FAKE_BREW_JSON="$brew_json" FAKE_BREW_AFTER_JSON="$after_json" FAKE_BREW_UPGRADE_RC=1 \
     RH_AUTOFIX_SOFTWARE=1 RH_AUTOFIX_SECURITY=0 RH_SKIP_SOFTWARE=0 RH_TODAY=2026-11-16 \
     RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas"
-  assert_not_contains "$scenario: 直った node@24 の古い更新 WARN を除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新.*node@24'
   case "$scenario" in
-    all|incidental)
-      assert_not_contains "$scenario: 項目がなくなれば WARN 行を除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新'
+    repaired-still-listed)
+      assert_contains '起動修復後も outdated に残る部品の更新 WARN は保つ' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新.*node@24'
+      ;;
+    *) assert_not_contains "$scenario: 解消した node@24 の更新 WARN は除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新.*node@24' ;;
+  esac
+  case "$scenario" in
+    all)
+      assert_not_contains "$scenario: 解消した node の WARN 項目を除く" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新.*node'
+      ;;
+    invalid-json)
+      assert_contains '更新待ちの再取得が不正な場合は未検査を残す' "$case_dir/output.txt" 'Homebrew.*未検査'
       ;;
     *)
-      assert_contains "$scenario: 更新待ちの node の元の文面を残す" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: node 26\.11\.1 → 26\.12\.0（brew upgrade で更新できます）$'
+      assert_contains "$scenario: 更新待ちの node の文面を残す" "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: .*node 26\.11\.1 → 26\.12\.0'
       ;;
   esac
-  if python3 - "$case_dir/output.txt" "$scenario" <<'PY'
+  if [ "$scenario" != invalid-json ]; then
+    if python3 - "$case_dir/output.txt" "$scenario" <<'PY'
 import sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    lines = handle.readlines()
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text().splitlines()
 before = next(i for i, line in enumerate(lines) if "WARN  ca-certificates の自動更新に失敗" in line)
-after = len(lines) if sys.argv[2] == "invalid-json" else next(
-    i for i, line in enumerate(lines) if "WARN  rclone の更新が" in line
-)
+after = next(i for i, line in enumerate(lines) if "WARN  rclone の更新が" in line)
 assert before < after
-if sys.argv[2] not in ("all", "incidental"):
+if sys.argv[2] != "all":
     middle = next(i for i, line in enumerate(lines) if "WARN  Mac のセキュリティ部品に更新" in line)
     assert before < middle < after
 PY
-  then pass "$scenario: ほかの WARN の順番を変えない"; else fail "$scenario: ほかの WARN の順番を変えない"; fi
-  if [ "$scenario" = incidental ]; then
-    assert_not_contains '巻き込みで更新済みの健康な node は修復しない' "$case_dir/brew.log" '^(upgrade|reinstall) node(@24)?$'
+    then pass "$scenario: ほかの WARN の順番を変えない"; else fail "$scenario: ほかの WARN の順番を変えない"; fi
   fi
 done
 
@@ -641,7 +725,7 @@ run_security "$case_dir" "$fake_bin" \
   FAKE_BREW_VERSIONS=$'node@24 24.22.3\n' RH_AUTOFIX_SOFTWARE=1 RH_SECURITY_ONLY=1 \
   FAKE_BREW_JSON='{"formulae":[{"name":"node@24","installed_versions":["24.22.3"],"current_version":"24.22.3_1"}]}'
 assert_contains '最後の WARN が消えても Bash 3.2 でレポートを作れる' "$case_dir/output.txt" '要対応: FAIL 0件 / WARN 0件'
-assert_contains '最後の WARN を消した場合も修復結果を残す' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3 を入れ直し'
+assert_contains '最後の WARN を消した場合も修復結果を残す' "$case_dir/output.txt" 'Homebrew: node@24 24\.22\.3( を入れ直し| → 24\.22\.3_1)'
 
 case_dir="$TEST_TMP/node-keg-no-formula"
 fake_bin="$case_dir/fake-bin"
@@ -1196,12 +1280,15 @@ printf '%s\n' '{"packages":[]}' > "$REPO_PATH/composer.lock"
 composer_fake="$case_dir/composer"
 {
   printf '%s\n' '#!/bin/bash'
+  printf '%s\n' 'printf "%s\n" "$*" >> "${FAKE_COMPOSER_ARGS:-/dev/null}"'
   printf '%s\n' 'printf "%s\n" '\''{"advisories":{"vendor/package":[{"severity":"high"}]}}'\'''
   printf '%s\n' 'exit 1'
 } > "$composer_fake"
 chmod +x "$composer_fake"
-run_composer "$case_dir/high" "$case_dir/root with space" "$composer_fake"
-assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  composerrepo — 本番依存に critical/high 脆弱性（composer）'
+FAKE_COMPOSER_ARGS="$case_dir/args.log" run_composer "$case_dir/high" "$case_dir/root with space" "$composer_fake"
+assert_contains 'composer のプラグインを読み込まない' "$case_dir/args.log" '--no-plugins'
+assert_contains 'composer のスクリプトを動かさない' "$case_dir/args.log" '--no-scripts'
+assert_contains 'composer の high 1件は FAIL' "$case_dir/high/output.txt" 'FAIL  composerrepo — 本番依存に critical/high 脆弱性（composer'
 run_composer "$case_dir/absent" "$case_dir/root with space" ''
 assert_contains 'composer 不在は WARN' "$case_dir/absent/output.txt" 'WARN  composerrepo — composer audit 実行不能（composer 不在）'
 
@@ -1686,7 +1773,7 @@ assert_contains 'security-only は空のルートでも専用見出しを出す'
 case_dir="$TEST_TMP/security-only-invalid"
 mkdir -p "$case_dir/home"
 HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/no-config.sh" RH_SECURITY_ONLY=2 \
-  bash "$HEALTH" > "$case_dir/output.txt" 2>&1
+  "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1
 invalid_rc=$?
 if [ "$invalid_rc" -ne 0 ]; then pass 'RH_SECURITY_ONLY=2 は停止する'; else fail 'RH_SECURITY_ONLY=2 は停止する'; fi
 assert_contains 'RH_SECURITY_ONLY=2 の fatal 理由を表示する' "$case_dir/output.txt" 'FATAL: RH_SECURITY_ONLY は 0 または 1 を指定してください'
@@ -1698,7 +1785,7 @@ HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/config.sh" RH_SECURITY_ONLY=0 RH
   RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
   RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
   RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
-  bash "$HEALTH" > "$case_dir/output.txt" 2>&1 || true
+  "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1 || true
 assert_contains '環境変数 RH_SECURITY_ONLY=0 が config.sh の 1 より優先される' "$case_dir/output.txt" 'FAIL  対象リポが0件です'
 assert_contains '環境変数で通常点検に戻ると通常見出しを出す' "$case_dir/output.txt" '^# リポジトリ・ヘルスチェック$'
 
@@ -1910,9 +1997,9 @@ run_security_discover() {
     RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
     RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_KIT_UPDATE_CHECK=0 \
     RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" \
-    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS= RH_BREW="$fake_bin/brew" \
-    RH_UV_CANDIDATES= RH_BUN_CANDIDATES= \
-    "$@" bash "$HEALTH" > "$output" 2>&1 || true
+    RH_MACOS_VERSION=27.0.1 RH_CLAUDE_CANDIDATES= RH_APP_DIRS="$case_dir/no-apps" RH_BREW="$fake_bin/brew" \
+    RH_UV_CANDIDATES= RH_BUN_CANDIDATES= RH_SKIP_SOFTWARE=1 \
+    "$@" "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
 }
 
 case_dir="$TEST_TMP/brew-formula-discover-old"
@@ -2280,6 +2367,615 @@ run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_
   RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250' FAKE_CLAUDE_LATEST=2.1.310 \
   FAKE_CLAUDE_TIME_JSON="$claude_times"
 assert_contains 'CLI の上げ先は公開3日以上の版にする' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300（最新 2\.1\.310 は .*公開・3 日待ち）'
+
+# ---- 0.6.0: 見逃し・更新の巻き込み・点検の継続 ----
+
+run_k1_case() {
+  local case_dir="$1" root="$2" fake_bin="$3"
+  shift 3
+  mkdir -p "$case_dir/home" "$case_dir/state"
+  env PATH="$fake_bin:$PATH" HOME="$case_dir/home" \
+    RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
+    RH_SKIP_SOFTWARE=1 RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    "$@" "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1
+  RUN_RC=$?
+}
+
+# JWT はこの場で作った署名なしの試験用データだけを使います。
+case_dir="$TEST_TMP/k1-secrets"
+make_remote_repo "$case_dir" secrets
+python3 - "$REPO_PATH" <<'PY'
+import base64
+import json
+import sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+def jwt(role):
+    payload = base64.urlsafe_b64encode(json.dumps({"role": role}).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJIUzI1NiJ9." + payload + ".fixture"
+for name in (".env.local", ".env.production"):
+    (repo / name).write_text("SUPABASE_SERVICE_ROLE_KEY=" + jwt("service_role") + "\n")
+(repo / "anon.ts").write_text("const publicToken = '" + jwt("anon") + "';\n")
+(repo / ".env.example").write_text("EMPTY=\nREF=op://fixture/item/field\nSAMPLE=<value>\nKEY=your-key\n")
+(repo / ".env.sample").write_text("KEY=" + "sb_secret_" + "x" * 30 + "\n")
+(repo / "types.ts").write_text("\n".join([
+    "sb_secret_" + "x" * 30,
+    "re_" + "x" * 24,
+    "AKIA" + "X" * 16,
+    "github_pat_" + "x" * 30,
+    "GOCSPX-" + "x" * 30,
+    "postgresql://fixture:fixture@localhost/db",
+]))
+PY
+commit_all
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
+assert_contains '追跡中の .env.local の service_role は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.local'
+assert_contains '追跡中の .env.production の service_role は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.production'
+assert_contains '見本ファイルでも実値の秘密は FAIL' "$case_dir/output.txt" 'FAIL  secrets .*\.env\.sample'
+assert_not_contains '空・1Password・見本値だけのテンプレートは除外する' "$case_dir/output.txt" 'FAIL .*\.env\.example'
+assert_not_contains 'anon JWT は秘密の検出対象にしない' "$case_dir/output.txt" 'FAIL .*anon\.ts'
+assert_contains '追加した秘密の型をソースでも検出する' "$case_dir/output.txt" 'FAIL .*types\.ts:[0-9]+'
+if python3 - "$case_dir/output.txt" "$REPO_PATH" <<'PY'
+import re
+import sys
+from pathlib import Path
+output = Path(sys.argv[1]).read_text()
+for path in Path(sys.argv[2]).iterdir():
+    if path.name not in ("types.ts", ".env.local", ".env.production", ".env.sample"):
+        continue
+    for line in path.read_text().splitlines():
+        value = line.partition("=")[2] if "=" in line else line
+        if value and value in output:
+            raise SystemExit(1)
+PY
+then pass '秘密の値をレポートに載せない'; else fail '秘密の値をレポートに載せない'; fi
+
+case_dir="$TEST_TMP/k1-anon-env"
+make_remote_repo "$case_dir" anonenv
+python3 - "$REPO_PATH/.env.local" <<'PY'
+import base64
+import sys
+from pathlib import Path
+payload = base64.urlsafe_b64encode(b'{"role":"anon"}').decode().rstrip("=")
+Path(sys.argv[1]).write_text("PUBLIC_KEY=eyJhbGciOiJIUzI1NiJ9." + payload + ".fixture\n")
+PY
+commit_all
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
+assert_not_contains 'anon JWT だけの追跡中 .env.local は秘密の FAIL にしない' "$case_dir/output.txt" 'FAIL .*平文シークレット'
+
+# 異常終了とタイムアウトを、当たりなしと区別します。
+for scenario in exit1 timeout array; do
+  case_dir="$TEST_TMP/k1-deny-$scenario"
+  make_remote_repo "$case_dir" scanerror
+  fake_bin="$case_dir/fake-bin"
+  mkdir -p "$fake_bin"
+  scanner="$PROJECT_DIR/bin/pkg-denylist-scan.py"
+  case "$scenario" in
+    exit1)
+      scanner="$case_dir/scanner.py"
+      printf 'raise SystemExit(1)\n' > "$scanner" ;;
+    timeout)
+      scanner="$case_dir/scanner.py"
+      printf 'import time\ntime.sleep(5)\n' > "$scanner"
+      real_perl="$(command -v perl)"
+      cat > "$fake_bin/perl" <<'SH'
+#!/bin/bash
+if [ "${3:-}" = 60 ]; then set -- "$1" "$2" 1 "${@:4}"; fi
+exec "$FAKE_REAL_PERL" "$@"
+SH
+      chmod +x "$fake_bin/perl" ;;
+    array)
+      printf '[]\n' > "$REPO_PATH/package-lock.json"
+      commit_all ;;
+  esac
+  run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_DENY_SCANNER="$scanner" FAKE_REAL_PERL="${real_perl:-/usr/bin/perl}"
+  assert_contains "$scenario: 照合不能を FAIL で知らせる" "$case_dir/output.txt" 'FAIL  scanerror .*侵害パッケージ照合.*(異常終了|動いていません)'
+done
+
+# 対応する各 lock の書式を実際の照合へ渡します。
+for format in pnpm-old pnpm-new yarn-v1 yarn-berry bun shrinkwrap; do
+  case_dir="$TEST_TMP/k1-lock-$format"
+  make_remote_repo "$case_dir" lockrepo
+  printf '{"name":"fixture"}\n' > "$REPO_PATH/package.json"
+  case "$format" in
+    pnpm-old) printf 'lockfileVersion: 6.0\npackages:\n  /keyv@6.0.0:\n    resolution: {}\n' > "$REPO_PATH/pnpm-lock.yaml" ;;
+    pnpm-new) printf "lockfileVersion: '9.0'\npackages:\n  keyv@6.0.0:\n    resolution: {}\n" > "$REPO_PATH/pnpm-lock.yaml" ;;
+    yarn-v1) printf '# yarn lockfile v1\n\nkeyv@^6.0.0:\n  version "6.0.0"\n' > "$REPO_PATH/yarn.lock" ;;
+    yarn-berry) printf '__metadata:\n  version: 8\n\n"keyv@npm:^6.0.0":\n  version: 6.0.0\n  resolution: "keyv@npm:6.0.0"\n' > "$REPO_PATH/yarn.lock" ;;
+    bun) printf '{\n  "lockfileVersion": 1,\n  "packages": {\n    "keyv": ["keyv@6.0.0", "", {}, "fixture"],\n  },\n}\n' > "$REPO_PATH/bun.lock" ;;
+    shrinkwrap) printf '{"lockfileVersion":3,"packages":{"node_modules/keyv":{"version":"6.0.0"}}}\n' > "$REPO_PATH/npm-shrinkwrap.json" ;;
+  esac
+  commit_all
+  run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
+  assert_contains "$format: 侵害版を照合して FAIL にする" "$case_dir/output.txt" 'FAIL  lockrepo .*keyv@6\.0\.0'
+done
+
+case_dir="$TEST_TMP/k1-bun-binary"
+make_remote_repo "$case_dir" binary
+printf 'fixture\000binary' > "$REPO_PATH/bun.lockb"
+commit_all
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
+assert_contains 'バイナリの bun.lockb は未照合の WARN' "$case_dir/output.txt" 'WARN .*bun\.lockb.*未照合|WARN .*未照合.*bun\.lockb'
+
+# 据え置きはパッケージまたは GHSA ごとに適用します。
+case_dir="$TEST_TMP/k1-vuln-allow"
+make_remote_repo "$case_dir" auditrepo
+fake_bin="$case_dir/fake-bin"
+mkdir -p "$fake_bin"
+printf '{"name":"fixture"}\n' > "$REPO_PATH/package.json"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$REPO_PATH/package-lock.json"
+commit_all
+cat > "$fake_bin/npm" <<'SH'
+#!/bin/bash
+[ "${1:-}" = audit ] || exit 1
+printf '%s\n' '{"metadata":{"vulnerabilities":{"critical":0,"high":2}},"vulnerabilities":{"allowed-pkg":{"severity":"high","via":[{"url":"https://github.com/advisories/GHSA-aaaa-bbbb-cccc"}]},"other-pkg":{"severity":"high","via":[{"url":"https://github.com/advisories/GHSA-dddd-eeee-ffff"}]}}}'
+exit 1
+SH
+chmod +x "$fake_bin/npm"
+printf 'auditrepo\tallowed-pkg\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
+assert_contains '据え置き外の high が残ると FAIL にする' "$case_dir/output.txt" 'FAIL  auditrepo .*据え置き 1 件・据え置き外 1 件'
+printf 'auditrepo\tGHSA-aaaa-bbbb-cccc,other-pkg\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
+assert_not_contains '複数の GHSA・パッケージに一致すれば FAIL を出さない' "$case_dir/output.txt" 'FAIL .*critical/high'
+assert_contains '据え置きの件数を参考に出す' "$case_dir/output.txt" '据え置き 2 件・据え置き外 0 件'
+printf 'auditrepo\t従来の説明文\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
+assert_contains '説明文形式の据え置きは移行の手がかりを出す' "$case_dir/output.txt" '据え置きの形式が古い'
+assert_not_contains '説明文形式は移行までは従来どおり効く' "$case_dir/output.txt" 'FAIL .*critical/high'
+
+# ff-only pull の安全条件と、リポ内の自動実行設定の抑止を確認します。
+for scenario in clean dirty stash ahead detached; do
+  case_dir="$TEST_TMP/k1-pull-$scenario"
+  make_remote_repo "$case_dir" pullrepo
+  root="$case_dir/root with space"
+  git clone -q "$case_dir/origin.git" "$case_dir/writer"
+  git -C "$case_dir/writer" config user.name tester
+  git -C "$case_dir/writer" config user.email tester@example.invalid
+  printf 'remote\n' > "$case_dir/writer/remote.txt"
+  git -C "$case_dir/writer" add remote.txt
+  git -C "$case_dir/writer" commit -q -m 'test: remote change'
+  git -C "$case_dir/writer" push -q
+  case "$scenario" in
+    dirty) printf 'local\n' >> "$REPO_PATH/README.md" ;;
+    stash) printf 'local\n' >> "$REPO_PATH/README.md"; git -C "$REPO_PATH" stash push -q ;;
+    ahead) printf 'local\n' > "$REPO_PATH/local.txt"; git -C "$REPO_PATH" add local.txt; git -C "$REPO_PATH" commit -q -m 'test: local change' ;;
+    detached) git -C "$REPO_PATH" checkout -q --detach ;;
+  esac
+  before_head="$(git -C "$REPO_PATH" rev-parse HEAD)"
+  if [ "$scenario" = clean ]; then
+    cat > "$case_dir/fsmonitor" <<'SH'
+#!/bin/bash
+: > "$FAKE_FSMONITOR_MARK"
+SH
+    cat > "$REPO_PATH/.git/hooks/post-merge" <<'SH'
+#!/bin/bash
+: > "$FAKE_POSTMERGE_MARK"
+SH
+    chmod +x "$case_dir/fsmonitor" "$REPO_PATH/.git/hooks/post-merge"
+    git -C "$REPO_PATH" config core.fsmonitor "$case_dir/fsmonitor"
+  fi
+  run_k1_case "$case_dir" "$root" "$case_dir/missing-bin" RH_SKIP_FETCH=0 RH_AUTOFIX_PULL=1 \
+    FAKE_FSMONITOR_MARK="$case_dir/fsmonitor.mark" FAKE_POSTMERGE_MARK="$case_dir/postmerge.mark"
+  after_head="$(git -c core.fsmonitor=false -C "$REPO_PATH" rev-parse HEAD)"
+  if [ "$scenario" = clean ]; then
+    if [ "$before_head" != "$after_head" ] && [ -f "$REPO_PATH/remote.txt" ]; then pass 'clean かつ behind のリポは ff-pull する'; else fail 'clean かつ behind のリポは ff-pull する'; fi
+    if [ ! -e "$case_dir/fsmonitor.mark" ] && [ ! -e "$case_dir/postmerge.mark" ]; then pass 'fsmonitor と post-merge は点検中に実行しない'; else fail 'fsmonitor と post-merge は点検中に実行しない'; fi
+  else
+    if [ "$before_head" = "$after_head" ]; then pass "$scenario: 自動 pull しない"; else fail "$scenario: 自動 pull しない"; fi
+  fi
+done
+
+# 同じ種類の未検査が続いた日数と、再開までの空白を知らせます。
+case_dir="$TEST_TMP/k1-unchecked-streak"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+for day in 01 02 03; do
+  run_security "$case_dir" "$fake_bin" RH_TODAY="2026-10-$day" FAKE_BREW_UPDATE_RC=1 FAKE_BREW_LOG="$case_dir/brew.log"
+  if [ "$day" != 03 ]; then assert_not_contains "$day: 未検査の初日・2日目は継続 WARN を出さない" "$case_dir/output.txt" 'WARN .*未検査.*日目'; fi
+done
+assert_contains '未検査が3日続くと日数つき WARN にする' "$case_dir/output.txt" 'WARN .*未検査.*3[ ]*日目|WARN .*3[ ]*日目.*未検査'
+printf '%s\n' "$(( $(date '+%s') - 40 * 3600 ))" > "$case_dir/state/last-completed"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains '前回の完了から36時間を超えたら知らせる' "$case_dir/output.txt" '前回の点検が 40 時間前で止まっていました'
+
+case_dir="$TEST_TMP/k1-lock"
+mkdir -p "$case_dir/home" "$case_dir/root" "$case_dir/state/run.lock"
+printf '%s %s\n' "$(date '+%s')" "$$" > "$case_dir/state/run.lock/started"
+lock_started=$SECONDS
+run_k1_case "$case_dir" "$case_dir/root" "$case_dir/missing-bin"
+if [ "$RUN_RC" -eq 0 ] && [ $((SECONDS-lock_started)) -lt 3 ] && [ ! -f "$case_dir/log/repo-health-latest.md" ]; then pass '実行 lock があると2本目はすぐ終了する'; else fail '実行 lock があると2本目はすぐ終了する'; fi
+
+# TERM または全体の時間切れで、不完全な結果を完成済みとして残しません。
+for scenario in term runtime; do
+  case_dir="$TEST_TMP/k1-stop-$scenario"
+  fake_bin="$case_dir/fake-bin"
+  mkdir -p "$fake_bin" "$case_dir/home" "$case_dir/root" "$case_dir/log"
+  printf 'previous report\n' > "$case_dir/log/repo-health-latest.md"
+  printf 'previous history\n' > "$case_dir/log/repo-health.log"
+  cat > "$fake_bin/brew" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = update ]; then : > "$FAKE_UPDATE_STARTED"; sleep 3; fi
+exit 1
+SH
+  chmod +x "$fake_bin/brew"
+  max_runtime=30
+  [ "$scenario" != runtime ] || max_runtime=1
+  env PATH="$fake_bin:$PATH" HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/missing-config" \
+    RH_ROOTS="$case_dir/root" RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SECURITY_ONLY=1 RH_SKIP_SECURITY=0 RH_SKIP_SOFTWARE=1 RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 \
+    RH_NO_DESKTOP=1 RH_NOMAIL=1 RH_KIT_UPDATE_CHECK=0 RH_SKIP_SOFTWAREUPDATE=1 RH_TLS_PROBE=0 \
+    RH_NODE_CANDIDATES= RH_JAVA_CANDIDATES= RH_CLAUDE_CANDIDATES= RH_APP_DIRS="$case_dir/no-apps" \
+    RH_PYTHON_SITE_DIRS= RH_UV_CANDIDATES= RH_BUN_CANDIDATES= RH_DOCKER="$fake_bin/missing-docker" RH_MACOS_VERSION=27.0.1 \
+    RH_MAX_RUNTIME="$max_runtime" RH_BREW="$fake_bin/brew" FAKE_UPDATE_STARTED="$case_dir/started" \
+    "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1 &
+  health_pid=$!
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do [ ! -f "$case_dir/started" ] || break; sleep 0.1; done
+  [ "$scenario" != term ] || kill -TERM "$health_pid"
+  wait "$health_pid"
+  stopped_rc=$?
+  if [ "$stopped_rc" -eq 143 ]; then pass "$scenario: 終了コードは143"; else fail "$scenario: 終了コードは143"; fi
+  assert_contains "$scenario: 前回のレポートを上書きしない" "$case_dir/log/repo-health-latest.md" '^previous report$'
+  assert_contains "$scenario: 履歴へ不完全な結果を追記しない" "$case_dir/log/repo-health.log" '^previous history$'
+  assert_count "$scenario: 履歴の行を増やさない" "$case_dir/log/repo-health.log" '.' 1
+done
+
+# メールの失敗を次に届ける本文の先頭に載せます。送信先も鍵も試験用です。
+case_dir="$TEST_TMP/k1-mail"
+make_remote_repo "$case_dir" mailrepo
+mkdir -p "$case_dir/root with space/materials" "$case_dir/fake-bin"
+printf 'fixture\n' > "$case_dir/root with space/materials/memo.txt"
+fake_bin="$case_dir/fake-bin"
+cat > "$fake_bin/security" <<'SH'
+#!/bin/bash
+printf 'fixture-mail-key\n'
+SH
+cat > "$fake_bin/curl" <<'SH'
+#!/bin/bash
+cat >/dev/null
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --data-binary ]; then shift; cp "${1#@}" "$FAKE_MAIL_PAYLOAD"; fi
+  shift
+done
+exit "${FAKE_CURL_RC:-0}"
+SH
+cat > "$fake_bin/osascript" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" >> "$FAKE_NOTIFY_LOG"
+SH
+chmod +x "$fake_bin/security" "$fake_bin/curl" "$fake_bin/osascript"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 RH_NO_DESKTOP=0 \
+  RH_MAIL_TO=fixture@example.invalid FAKE_CURL_RC=1 FAKE_MAIL_PAYLOAD="$case_dir/payload.json" FAKE_NOTIFY_LOG="$case_dir/notify.log"
+assert_contains '送信失敗の回数を状態に残す' "$case_dir/state/mail-failures" '^1$'
+assert_contains '送信失敗をデスクトップへ通知する' "$case_dir/notify.log" '送.*(失敗|ません|でき)'
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 RH_NO_DESKTOP=0 \
+  RH_MAIL_TO=fixture@example.invalid FAKE_CURL_RC=0 FAKE_MAIL_PAYLOAD="$case_dir/payload.json" FAKE_NOTIFY_LOG="$case_dir/notify.log"
+if python3 - "$case_dir/payload.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text())
+assert payload["text"].startswith("前回まで 1 回送れませんでした")
+PY
+then pass '次に届くメールの先頭で前回の送信失敗を知らせる'; else fail '次に届くメールの先頭で前回の送信失敗を知らせる'; fi
+if [ ! -f "$case_dir/state/mail-failures" ] || [ "$(cat "$case_dir/state/mail-failures")" = 0 ]; then pass '送信成功後は失敗の目印を解消する'; else fail '送信成功後は失敗の目印を解消する'; fi
+assert_not_contains '試験用の鍵もレポート・履歴へ出さない' "$case_dir/log/repo-health.log" 'fixture-mail-key'
+: > "$case_dir/notify.log"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=none RH_NO_DESKTOP=0 FAKE_NOTIFY_LOG="$case_dir/notify.log"
+assert_contains 'メールなしでも WARN をデスクトップへ通知する' "$case_dir/notify.log" 'display notification'
+assert_not_contains 'WARN だけの通知は音を付けない' "$case_dir/notify.log" 'sound name'
+: > "$case_dir/notify.log"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 RH_NO_DESKTOP=1 \
+  RH_MAIL_TO=fixture@example.invalid FAKE_CURL_RC=1 FAKE_MAIL_PAYLOAD="$case_dir/payload.json" FAKE_NOTIFY_LOG="$case_dir/notify.log"
+assert_not_contains 'RH_NO_DESKTOP=1 はメール失敗通知も出さない' "$case_dir/notify.log" '.'
+
+# 更新の前後を記録し、更新しない部品との依存関係も守ります。
+case_dir="$TEST_TMP/k1-incidental"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+printf '[]\n' > "$case_dir/catalog.json"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_VERSIONS=$'rclone 1.0.0\notherlib 1.0.0\n' \
+  FAKE_BREW_SNAPSHOT_AFTER=$'rclone 2.0.0\notherlib 1.1.0\n' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}' \
+  FAKE_BREW_AFTER_JSON='{"formulae":[],"casks":[]}'
+assert_contains '名指し以外に上がった formula も AUTOFIXED に載せる' "$case_dir/output.txt" 'Homebrew: otherlib 1\.0\.0 → 1\.1\.0（巻き込みで更新）'
+
+for protection in security ignore pin; do
+  case_dir="$TEST_TMP/k1-protected-$protection"
+  fake_bin="$case_dir/fake-bin"
+  make_fake_brew "$fake_bin"
+  make_fake_software_npm "$fake_bin"
+  : > "$case_dir/brew.log"
+  printf '[]\n' > "$case_dir/catalog.json"
+  protected=node
+  ignore=""; pinned=""
+  case "$protection" in
+    ignore) protected=keepme; ignore=keepme ;;
+    pin) protected=keepme; pinned=$'keepme\n' ;;
+  esac
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+    RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
+    RH_SOFTWARE_IGNORE="$ignore" FAKE_BREW_PINNED="$pinned" FAKE_BREW_DEPS="$protected" \
+    FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+  assert_not_contains "$protection: 保護対象を依存先に含む formula は上げない" "$case_dir/brew.log" '^upgrade --formula rclone$'
+  assert_contains "$protection: 自動更新を見送った理由を WARN に出す" "$case_dir/output.txt" "WARN .*rclone は $protected を一緒に上げるため自動更新しませんでした"
+done
+
+case_dir="$TEST_TMP/k1-protected-dependent"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+printf '[]\n' > "$case_dir/catalog.json"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" FAKE_BREW_USES=node \
+  FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_contains '保護対象が依存元のときは巻き込みを止めて候補を更新する' "$case_dir/brew.log" '^upgrade --formula rclone$'
+assert_contains '依存元の自動更新を止めるフラグを付ける' "$case_dir/brew.log" '^deps-check=1$'
+
+case_dir="$TEST_TMP/k1-revision"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SOFTWARE=1 \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.13.1_1"],"current_version":"26.13.1_2"}],"casks":[]}'
+assert_contains '同じ版の改訂だけならセキュリティ自動更新OFFでも上げる' "$case_dir/brew.log" '^upgrade node$'
+assert_contains '改訂だけの更新は作り直しとして記録する' "$case_dir/output.txt" 'node .*26\.13\.1_1 → 26\.13\.1_2.*同じ版の作り直し'
+assert_not_contains '更新済みの改訂は更新待ち WARN から外す' "$case_dir/output.txt" 'WARN .*セキュリティ部品に更新.*node '
+
+case_dir="$TEST_TMP/k1-pinned-security"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SECURITY=1 \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.13.1"],"current_version":"26.14.0","pinned":true}],"casks":[]}'
+assert_not_contains 'pin 中のセキュリティ部品を更新しない' "$case_dir/brew.log" '^upgrade node$'
+assert_not_contains 'pin 中の部品を更新待ち WARN にしない' "$case_dir/output.txt" 'WARN .*セキュリティ部品に更新.*node '
+assert_contains 'pin 中であることを参考に出す' "$case_dir/output.txt" 'node.*pin 中|pin 中.*node'
+
+case_dir="$TEST_TMP/k1-partial-security"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SECURITY=1 FAKE_BREW_UPGRADE_RC=1 \
+  FAKE_BREW_VERSIONS=$'node 26.13.1\npython@3.14 3.14.1\n' \
+  FAKE_BREW_SNAPSHOT_AFTER=$'node 26.14.0\npython@3.14 3.14.1\n' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.13.1"],"current_version":"26.14.0"},{"name":"python@3.14","installed_versions":["3.14.1"],"current_version":"3.14.2"}],"casks":[]}' \
+  FAKE_BREW_AFTER_JSON='{"formulae":[{"name":"python@3.14","installed_versions":["3.14.1"],"current_version":"3.14.2"}],"casks":[]}'
+assert_contains '終了コードが非0でも上がったセキュリティ部品は記録する' "$case_dir/output.txt" 'Homebrew: node 26\.13\.1 → 26\.14\.0'
+assert_contains '上がらなかった部品は WARN に残す' "$case_dir/output.txt" 'WARN .*python@3\.14.*(失敗|更新)'
+
+case_dir="$TEST_TMP/k1-node-revisit"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node_keg "$case_dir" node@22
+make_fake_node_keg "$case_dir" node@24 all
+: > "$case_dir/brew.log"
+: > "$case_dir/node.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+  FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+  FAKE_BREW_FORMULAE=$'node@22\nnode@24\n' FAKE_BREW_FIX_ON=upgrade \
+  FAKE_BREW_BREAK_AFTER_UPGRADE=node@22 RH_AUTOFIX_SOFTWARE=1 \
+  FAKE_BREW_VERSIONS=$'node@22 22.0.0\nnode@24 24.22.3\n'
+if LC_ALL=C grep -qE '^upgrade node@22$' "$case_dir/brew.log" || LC_ALL=C grep -qE 'WARN .*node@22.*起動しません' "$case_dir/output.txt"; then
+  pass '別の node の修復で壊れた node@22 も同じ回に拾う'
+else fail '別の node の修復で壊れた node@22 も同じ回に拾う'; fi
+
+case_dir="$TEST_TMP/k1-linkage"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+mkdir -p "$case_dir/state"
+printf 'broken\n' > "$case_dir/state/python@3.14.broken"
+: > "$case_dir/brew.log"
+: > "$case_dir/linkage.log"
+printf '[]\n' > "$case_dir/catalog.json"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_USES=python@3.14 FAKE_BREW_LINKAGE_LOG="$case_dir/linkage.log" \
+  FAKE_BREW_STATE_DIR="$case_dir/state" FAKE_BREW_FIX_ON=upgrade \
+  FAKE_BREW_VERSIONS=$'rclone 1.0.0\npython@3.14 3.14.1\n' \
+  FAKE_BREW_SNAPSHOT_AFTER=$'rclone 2.0.0\npython@3.14 3.14.1\n' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_contains '更新した formula の node 以外の依存元も linkage を調べる' "$case_dir/linkage.log" '^linkage --test python@3\.14$'
+assert_contains 'linkage が壊れた依存元を名指しして修復する' "$case_dir/brew.log" '^upgrade python@3\.14$'
+
+case_dir="$TEST_TMP/k1-node-list-failure"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_LIST_RC=1
+assert_contains 'node の導入一覧取得が失敗したら未検査を残す' "$case_dir/output.txt" 'Homebrew.*未検査'
+
+# npm 以外の audit も、各道具の JSON を判定します。
+for tool in pnpm yarn bun; do
+  for severity in clean high; do
+    case_dir="$TEST_TMP/k1-audit-$tool-$severity"
+    make_remote_repo "$case_dir" audittool
+    fake_bin="$case_dir/fake-bin"
+    mkdir -p "$fake_bin"
+    printf '{"name":"fixture"}\n' > "$REPO_PATH/package.json"
+    case "$tool" in
+      pnpm) printf "lockfileVersion: '9.0'\npackages:\n  safe-pkg@1.0.0:\n    resolution: {}\n" > "$REPO_PATH/pnpm-lock.yaml" ;;
+      yarn) printf '__metadata:\n  version: 8\n\n"safe-pkg@npm:1.0.0":\n  version: 1.0.0\n  resolution: "safe-pkg@npm:1.0.0"\n' > "$REPO_PATH/yarn.lock" ;;
+      bun) printf '{"lockfileVersion":1,"packages":{"safe-pkg":["safe-pkg@1.0.0","",{}]}}\n' > "$REPO_PATH/bun.lock" ;;
+    esac
+    commit_all
+    cat > "$fake_bin/$tool" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = --version ]; then printf '4.5.0\n'; exit 0; fi
+printf '%s\n' "$*" >> "$FAKE_AUDIT_ARGS"
+cat "$FAKE_AUDIT_RESULT"
+SH
+    chmod +x "$fake_bin/$tool"
+    if [ "$tool" = yarn ]; then
+      if [ "$severity" = clean ]; then : > "$case_dir/result.json";
+      else
+        printf '%s\n' '{"value":"safe-pkg","children":{"Severity":"high","URL":"https://github.com/advisories/GHSA-aaaa-bbbb-cccc"}}' '{"value":"safe-pkg","children":{"Severity":"moderate","URL":"https://github.com/advisories/GHSA-dddd-eeee-ffff"}}' > "$case_dir/result.json"
+      fi
+    elif [ "$tool" = pnpm ]; then
+      if [ "$severity" = clean ]; then printf '{"advisories":{},"metadata":{"vulnerabilities":{"high":0}}}\n' > "$case_dir/result.json";
+      else printf '{"advisories":{"123":{"module_name":"safe-pkg","severity":"high","url":"https://github.com/advisories/GHSA-aaaa-bbbb-cccc"}}}\n' > "$case_dir/result.json"; fi
+    else
+      if [ "$severity" = clean ]; then printf '{}\n' > "$case_dir/result.json";
+      else printf '{"safe-pkg":[{"severity":"high","url":"https://github.com/advisories/GHSA-aaaa-bbbb-cccc"}]}\n' > "$case_dir/result.json"; fi
+    fi
+    run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 \
+      FAKE_AUDIT_ARGS="$case_dir/args.log" FAKE_AUDIT_RESULT="$case_dir/result.json"
+    if [ "$severity" = high ]; then
+      assert_contains "$tool: audit の high は FAIL にする" "$case_dir/output.txt" 'FAIL  audittool .*critical/high'
+    else
+      assert_not_contains "$tool: audit の指摘なしは WARN・FAIL を出さない" "$case_dir/output.txt" '(FAIL|WARN).*audit.*(実行不能|critical/high)'
+    fi
+    case "$tool" in
+      pnpm) assert_contains 'pnpm audit は本番依存を指定する' "$case_dir/args.log" '^audit --prod --json$' ;;
+      yarn) assert_contains 'yarn berry は npm audit サブコマンドを使う' "$case_dir/args.log" '^npm audit --all --recursive --environment production --json$' ;;
+      bun) assert_contains 'bun audit は JSON を指定する' "$case_dir/args.log" '^audit --json$' ;;
+    esac
+  done
+done
+
+case_dir="$TEST_TMP/k1-same-package-ghsa"
+make_remote_repo "$case_dir" advisories
+fake_bin="$case_dir/fake-bin"
+mkdir -p "$fake_bin"
+printf '{"name":"fixture"}\n' > "$REPO_PATH/package.json"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$REPO_PATH/package-lock.json"
+commit_all
+cat > "$fake_bin/npm" <<'SH'
+#!/bin/bash
+printf '%s\n' '{"metadata":{"vulnerabilities":{"high":1}},"vulnerabilities":{"safe-pkg":{"severity":"high","via":[{"severity":"high","url":"https://github.com/advisories/GHSA-aaaa-bbbb-cccc"},{"severity":"high","url":"https://github.com/advisories/GHSA-dddd-eeee-ffff"}]}}}'
+SH
+chmod +x "$fake_bin/npm"
+printf 'advisories\tGHSA-aaaa-bbbb-cccc\t2999-12-31\tfixture\n' > "$case_dir/allow.tsv"
+run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SKIP_AUDIT=0 RH_VULN_ALLOW_FILE="$case_dir/allow.tsv"
+assert_contains '同じパッケージの別 GHSA まで据え置きにしない' "$case_dir/output.txt" 'FAIL  advisories .*据え置き 1 件・据え置き外 1 件'
+
+case_dir="$TEST_TMP/k1-node-transient"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_node_keg "$case_dir" node@24
+: > "$case_dir/brew.log"
+: > "$case_dir/node.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_NODE_KEG_LOG="$case_dir/node.log" \
+  FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_BREW_STATE_DIR="$case_dir/state" \
+  FAKE_BREW_FORMULAE=node@24 FAKE_NODE_TRANSIENT_FORMULA=node@24 RH_AUTOFIX_SOFTWARE=1
+assert_not_contains '1回だけの起動失敗では node を更新・入れ直ししない' "$case_dir/brew.log" '^(upgrade|reinstall) node@24$'
+assert_not_contains '2回目に起動した node は起動 WARN にしない' "$case_dir/output.txt" 'WARN .*node@24.*起動しません'
+
+case_dir="$TEST_TMP/k1-linkage-timeout"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+real_perl="$(command -v perl)"
+cat > "$fake_bin/perl" <<'SH'
+#!/bin/bash
+if [ "${3:-}" = 60 ]; then set -- "$1" "$2" 1 "${@:4}"; fi
+exec "$FAKE_REAL_PERL" "$@"
+SH
+chmod +x "$fake_bin/perl"
+: > "$case_dir/brew.log"
+printf '[]\n' > "$case_dir/catalog.json"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_USES=python@3.14 FAKE_BREW_LINKAGE_SLEEP=3 FAKE_REAL_PERL="$real_perl" \
+  FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_contains 'linkage の時間切れは未検査を残す' "$case_dir/output.txt" 'linkage.*制限時間.*未検査'
+
+# 追跡中の env は、値のないものや参照だけのものも追跡自体を知らせます。
+case_dir="$TEST_TMP/k1-tracked-env-policy"
+make_remote_repo "$case_dir" envpolicy
+printf '.env*\n' > "$REPO_PATH/.gitignore"
+: > "$REPO_PATH/.env.local"
+printf 'KEY=op://fixture/item/field\n' > "$REPO_PATH/.env.production"
+git -C "$REPO_PATH" add .gitignore
+git -C "$REPO_PATH" add -f .env.local .env.production
+git -C "$REPO_PATH" commit -q -m 'test: tracked env fixtures'
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin"
+assert_contains '空でも追跡中の .env.local は FAIL' "$case_dir/output.txt" 'FAIL  envpolicy .*\.env\.local'
+assert_contains '見本名以外の追跡中 env は参照値だけでも FAIL' "$case_dir/output.txt" 'FAIL  envpolicy .*\.env\.production'
+
+# 未検査の連続は日が空いたら数え直します。
+case_dir="$TEST_TMP/k1-unchecked-gap"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+for day in 01 03 04; do
+  run_security "$case_dir" "$fake_bin" RH_TODAY="2026-10-$day" FAKE_BREW_UPDATE_RC=1 FAKE_BREW_LOG="$case_dir/brew.log"
+done
+assert_not_contains '点検日が空いた未検査を連続3日とは数えない' "$case_dir/output.txt" 'WARN .*未検査.*日目'
+run_security "$case_dir" "$fake_bin" RH_TODAY=2026-10-05 FAKE_BREW_UPDATE_RC=1 FAKE_BREW_LOG="$case_dir/brew.log"
+assert_contains '数え直した未検査も3日目に WARN' "$case_dir/output.txt" 'WARN .*未検査.*3日目'
+
+case_dir="$TEST_TMP/k1-stale-lock"
+mkdir -p "$case_dir/home" "$case_dir/root" "$case_dir/state/run.lock"
+python3 - "$case_dir/state/run.lock" <<'PY'
+import os
+import sys
+import time
+past = time.time() - 10801
+os.utime(sys.argv[1], (past, past))
+PY
+run_k1_case "$case_dir" "$case_dir/root" "$case_dir/missing-bin"
+if [ -f "$case_dir/log/repo-health-latest.md" ] && [ ! -d "$case_dir/state/run.lock" ]; then pass '3時間を過ぎた lock は回復して点検を完了する'; else fail '3時間を過ぎた lock は回復して点検を完了する'; fi
+
+# 送信中に中断しても、その回のレポートと履歴を公開しません。
+case_dir="$TEST_TMP/k1-mail-term"
+make_remote_repo "$case_dir" interruptedmail
+mkdir -p "$case_dir/fake-bin" "$case_dir/log" "$case_dir/root with space/materials"
+printf 'fixture\n' > "$case_dir/root with space/materials/memo.txt"
+printf 'previous report\n' > "$case_dir/log/repo-health-latest.md"
+printf 'previous history\n' > "$case_dir/log/repo-health.log"
+cat > "$case_dir/fake-bin/security" <<'SH'
+#!/bin/bash
+printf 'fixture-mail-key\n'
+SH
+cat > "$case_dir/fake-bin/curl" <<'SH'
+#!/bin/bash
+cat >/dev/null
+: > "$FAKE_MAIL_STARTED"
+sleep 3
+exit 0
+SH
+chmod +x "$case_dir/fake-bin/security" "$case_dir/fake-bin/curl"
+env PATH="$case_dir/fake-bin:$PATH" HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/no-config" \
+  RH_ROOTS="$case_dir/root with space" RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+  RH_SKIP_SECURITY=1 RH_SKIP_SOFTWARE=1 RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_AUTOFIX_PULL=0 \
+  RH_NO_DESKTOP=1 RH_NOMAIL=0 RH_MAIL_METHOD=resend RH_MAIL_TO=fixture@example.invalid \
+  FAKE_MAIL_STARTED="$case_dir/started" "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1 &
+health_pid=$!
+for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ ! -f "$case_dir/started" ] || break; sleep 0.1; done
+kill -TERM "$health_pid"
+wait "$health_pid"
+mail_stop_rc=$?
+if [ "$mail_stop_rc" = 143 ]; then pass '送信中の TERM も143で終了する'; else fail '送信中の TERM も143で終了する'; fi
+assert_contains '送信中断では前回のレポートを保つ' "$case_dir/log/repo-health-latest.md" '^previous report$'
+assert_count '送信中断では履歴の行を増やさない' "$case_dir/log/repo-health.log" '.' 1
+
+# audit が返す空 object と、詳細の欠けた重大な集計を区別します。
+case_dir="$TEST_TMP/k1-audit-invalid-counts"
+make_remote_repo "$case_dir" incompleteaudit
+mkdir -p "$case_dir/fake-bin"
+printf '{"name":"fixture"}\n' > "$REPO_PATH/package.json"
+printf '{"lockfileVersion":3,"packages":{}}\n' > "$REPO_PATH/package-lock.json"
+commit_all
+cat > "$case_dir/fake-bin/npm" <<'SH'
+#!/bin/bash
+printf '%s\n' "$FAKE_AUDIT_JSON"
+SH
+chmod +x "$case_dir/fake-bin/npm"
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/fake-bin" RH_SKIP_AUDIT=0 FAKE_AUDIT_JSON='{}'
+assert_contains 'npm audit の空 object を指摘なしと見なさない' "$case_dir/output.txt" 'WARN .*npm audit 実行不能'
+run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/fake-bin" RH_SKIP_AUDIT=0 \
+  FAKE_AUDIT_JSON='{"vulnerabilities":{},"metadata":{"vulnerabilities":{"high":1}}}'
+assert_contains '詳細の欠けた high も据え置き外に残す' "$case_dir/output.txt" 'FAIL .*据え置き外 1 件'
 
 if [ "$failed" -gt 0 ]; then
   printf '# %s/%s tests failed\n' "$failed" "$total"

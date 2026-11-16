@@ -93,6 +93,7 @@ fi
 : "${RH_AUTOFIX_SOFTWARE:=0}"
 : "${RH_SOFTWARE_STALE_DAYS:=14}"
 : "${RH_SOFTWARE_SKIP_TOOLS:=}"
+: "${RH_MAX_RUNTIME:=2400}"
 
 RH_CONFIG_FILE="${RH_CONFIG_FILE:-$HOME/.config/repo-health-kit/config.sh}"
 if [ -f "$RH_CONFIG_FILE" ]; then
@@ -145,6 +146,8 @@ is_uint "$RH_SKIP_SOFTWARE" || fatal "RH_SKIP_SOFTWARE は0以上の整数で指
 is_uint "$RH_AUTOFIX_SOFTWARE" || fatal "RH_AUTOFIX_SOFTWARE は0以上の整数で指定してください"
 is_uint "$RH_SOFTWARE_STALE_DAYS" || fatal "RH_SOFTWARE_STALE_DAYS は0以上の整数で指定してください"
 
+is_uint "$RH_MAX_RUNTIME" && [ "$RH_MAX_RUNTIME" -gt 0 ] || fatal "RH_MAX_RUNTIME は正の秒数で指定してください"
+
 APP_DIR="${RH_APP_DIR:-$HOME/Library/Application Support/repo-health-kit}"
 LOG_DIR="${RH_LOG_DIR:-$HOME/Library/Logs/repo-health-kit}"
 STATE_DIR="${RH_STATE_DIR:-$APP_DIR/state}"
@@ -162,12 +165,87 @@ TLS_PROBES="${RH_TLS_PROBES:-$KIT_DIR/config/tls-probes.tsv}"
 mkdir -p "$LOG_DIR" "$STATE_DIR" || fatal "ログまたは状態の保存先を作成できません"
 chmod 700 "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repo-health.XXXXXX")" || fatal "一時ディレクトリを作成できません"
-# shellcheck disable=SC2329  # trap から呼び出します。
-cleanup() {
-  rm -rf "$TMP_DIR"
+# 点検を専用のプロセスグループで動かし、子コマンドも制限時間に含めます。
+# ps によるプロセス一覧が利用できない環境でも同じように停止できます。
+if [ "${RH_RUNTIME_CHILD:-0}" != 1 ]; then
+  # bash の配列は環境へ export できないため、呼出元の scalar を復元して渡します。
+  if [ -n "$RH_ENV_ROOTS_SET" ]; then
+    unset RH_ROOTS
+    # shellcheck disable=SC2178  # 再起動先へ渡すときだけ配列から scalar に戻します。
+    export RH_ROOTS="$RH_ENV_ROOTS_VALUE"
+  fi
+  if [ -n "$RH_ENV_SOFTWARE_IGNORE_SET" ]; then
+    unset RH_SOFTWARE_IGNORE
+    # shellcheck disable=SC2178  # 再起動先へ渡すときだけ配列から scalar に戻します。
+    export RH_SOFTWARE_IGNORE="$RH_ENV_SOFTWARE_IGNORE_VALUE"
+  fi
+  RH_RUNTIME_CHILD=1 exec perl - "$RH_MAX_RUNTIME" "$BASH" "$0" "$@" <<'PERL'
+use strict;
+use warnings;
+use POSIX qw(setpgid);
+my $seconds = shift @ARGV;
+my $pid = fork();
+defined $pid or die "runtime guard: fork failed\n";
+if ($pid == 0) {
+    setpgid(0, 0) == 0 or die "runtime guard: setpgid failed\n";
+    exec @ARGV or die "runtime guard: exec failed\n";
 }
-trap cleanup EXIT HUP INT TERM
+# 親からも設定し、起動直後に届く停止信号との競合を避けます。
+setpgid($pid, $pid);
+my $stop_code = 0;
+my $stop = sub {
+    my ($code) = @_;
+    if ($stop_code) {
+        kill 'KILL', -$pid;
+    } else {
+        $stop_code = $code;
+        kill 'TERM', -$pid;
+        alarm 2;
+    }
+};
+$SIG{ALRM} = sub { $stop->(143) };
+$SIG{TERM} = sub { $stop->(143) };
+$SIG{HUP} = sub { $stop->(143) };
+$SIG{INT} = sub { $stop->(130) };
+alarm $seconds;
+my $result;
+do { $result = waitpid($pid, 0) } while $result == -1 && $!{EINTR};
+my $status = $?;
+alarm 0;
+exit $stop_code if $stop_code;
+exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+PERL
+fi
+
+# mkdir が成功した回だけが点検と後始末を行います。
+RUN_LOCK="$STATE_DIR/run.lock"
+if ! mkdir "$RUN_LOCK" 2>/dev/null; then
+  lock_started="$(stat -f '%m' "$RUN_LOCK" 2>/dev/null || stat -c '%Y' "$RUN_LOCK" 2>/dev/null || printf '0')"
+  is_uint "$lock_started" || lock_started=0
+  if [ $(( $(date '+%s') - lock_started )) -lt 10800 ]; then
+    printf 'repo-health: 点検中のため終了します\n'
+    exit 0
+  fi
+  mkdir "$STATE_DIR/run.lock.reclaim" 2>/dev/null || exit 0
+  lock_started="$(stat -f '%m' "$RUN_LOCK" 2>/dev/null || stat -c '%Y' "$RUN_LOCK" 2>/dev/null || printf '0')"
+  is_uint "$lock_started" || lock_started=0
+  if [ $(( $(date '+%s') - lock_started )) -lt 10800 ]; then
+    rmdir "$STATE_DIR/run.lock.reclaim"
+    exit 0
+  fi
+  rm -rf "$RUN_LOCK"
+  mkdir "$RUN_LOCK" 2>/dev/null || { rmdir "$STATE_DIR/run.lock.reclaim"; exit 0; }
+  rmdir "$STATE_DIR/run.lock.reclaim"
+fi
+printf '%s %s\n' "$(date '+%s')" "$$" > "$RUN_LOCK/started"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/repo-health.XXXXXX")" || fatal "一時ディレクトリを作成できません"
+# shellcheck disable=SC2329  # EXIT trap から呼び出します。
+cleanup() {
+  rm -rf "$TMP_DIR" "$RUN_LOCK"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 declare -a FAILURES WARNINGS AUTOFIXED WORKING SYNC_WAIT CLI_UPDATES SOFTWARE_UPDATES NOTES DETAILS
 FAILURES=(); WARNINGS=(); AUTOFIXED=(); WORKING=(); SYNC_WAIT=(); CLI_UPDATES=(); SOFTWARE_UPDATES=(); NOTES=(); DETAILS=()
@@ -176,9 +254,18 @@ add_failure() { FAILURES[${#FAILURES[@]}]="$(clean_text "$*")"; }
 add_warning() { WARNINGS[${#WARNINGS[@]}]="$(clean_text "$*")"; }
 add_detail() { DETAILS[${#DETAILS[@]}]="$(clean_text "$*")"; }
 
+# shellcheck disable=SC2329  # process substitution と timeout 経由でも使います。
+rh_git() {
+  command git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.sshCommand=ssh "$@"
+}
+
 run_timeout() {
   local seconds="$1"
   shift
+  if [ "${1-}" = "rh_git" ]; then
+    shift
+    set -- git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.sshCommand=ssh "$@"
+  fi
   perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
 }
 
@@ -196,7 +283,7 @@ streak_file() {
 streak_bump() {
   local file today saved_date count
   file="$(streak_file "$1")"
-  today="$(TZ=Asia/Tokyo date '+%Y-%m-%d')"
+  today="${RH_TODAY:-$(TZ=Asia/Tokyo date '+%Y-%m-%d')}"
   saved_date=""; count=0
   if [ -f "$file" ]; then
     read -r saved_date count < "$file" 2>/dev/null || true
@@ -216,74 +303,123 @@ streak_reset() {
 
 git_internal_path() {
   local repo="$1" value
-  value="$(git -C "$repo" rev-parse --git-path "$2" 2>/dev/null)" || return 1
+  value="$(rh_git -C "$repo" rev-parse --git-path "$2" 2>/dev/null)" || return 1
   case "$value" in
     /*) printf '%s' "$value" ;;
     *) printf '%s/%s' "$repo" "$value" ;;
   esac
 }
 
-vulnerability_allowed() {
-  local repo="$1" today row_repo advisory expiry reason
-  [ -f "$VULN_ALLOW_FILE" ] || return 1
-  today="$(TZ=Asia/Tokyo date '+%Y-%m-%d')"
-  while IFS=$'\t' read -r row_repo advisory expiry reason; do
-    case "$row_repo" in ''|\#*) continue;; esac
-    [ "$row_repo" = "$repo" ] || continue
-    case "$expiry" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) continue;; esac
-    [ "$expiry" \< "$today" ] && continue
-    printf '%s\t%s\t%s' "$advisory" "$expiry" "$reason"
-    return 0
-  done < "$VULN_ALLOW_FILE"
-  return 1
-}
-
-is_exempt_env_name() {
-  case "$(basename -- "$1")" in
-    .env.local|.env.tpl|.env.example|.env.sample) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-looks_like_plain_secret() {
-  local file="$1" base
-  base="$(basename -- "$file")"
-  if [ "$base" = ".env" ] && LC_ALL=C grep -qE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=.+' "$file" 2>/dev/null; then
-    return 0
-  fi
-  LC_ALL=C grep -qE 'AIza[0-9A-Za-z_-]{35}|sk-ant-[A-Za-z0-9_-]{40,}|sk-proj-[A-Za-z0-9_-]{40,}|sk_(live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{25,}|gh[pous]_[A-Za-z0-9]{30,}|sbp_[a-f0-9]{40}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' "$file" 2>/dev/null
-}
-
-scan_secret_file() {
-  local repo="$1" repo_name="$2" kind="$3" rel="$4" file
-  is_exempt_env_name "$rel" && return 0
-  case "$rel" in *node_modules/*) return 0;; esac
-  file="$repo/$rel"
-  [ -f "$file" ] || return 0
-  if looks_like_plain_secret "$file"; then
-    if [ "$kind" = "tracked" ]; then
-      add_failure "$repo_name — 平文シークレットが commit 済み: $rel"
-    else
-      add_failure "$repo_name — 平文シークレットが未追跡かつ gitignore 外: $rel"
-    fi
-  fi
-}
-
 scan_secrets() {
-  local repo="$1" repo_name="$2" rel
-  while IFS= read -r -d '' rel; do
-    scan_secret_file "$repo" "$repo_name" tracked "$rel"
-  done < <(git -C "$repo" -c core.quotepath=false ls-files -z 2>/dev/null)
-  while IFS= read -r -d '' rel; do
-    scan_secret_file "$repo" "$repo_name" untracked "$rel"
-  done < <(git -C "$repo" -c core.quotepath=false ls-files --others --exclude-standard -z 2>/dev/null)
+  local repo="$1" repo_name="$2" pattern tracked untracked output rel line secret_type kind
+  tracked="$TMP_DIR/secrets-tracked.list"
+  untracked="$TMP_DIR/secrets-untracked.list"
+  output="$TMP_DIR/secrets-hits.tsv"
+  pattern='AIza[0-9A-Za-z_-]{35}|sk-ant-[A-Za-z0-9_-]{40,}|sk-proj-[A-Za-z0-9_-]{40,}|sk_(live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{25,}|gh[pous]_[A-Za-z0-9]{30,}|sbp_[a-f0-9]{40}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sb_secret_[A-Za-z0-9_-]+|re_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]+|GOCSPX-[A-Za-z0-9_-]+|postgres(ql)?://[^[:space:]]+|^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*='
+  # 候補の絞り込みはまとめて行い、ファイルごとの grep 起動を避けます。
+  rh_git -C "$repo" grep -I -l -E -z "$pattern" -- . ':!node_modules' ':!**/node_modules/**' > "$tracked" 2>/dev/null || true
+  rh_git -C "$repo" ls-files -z -- '.env*' '**/.env*' >> "$tracked" 2>/dev/null || true
+  (cd "$repo" && rh_git ls-files -z --others --exclude-standard | xargs -0 grep -l -I -E --null -- "$pattern" /dev/null) > "$untracked" 2>/dev/null || true
+  if ! python3 - "$repo" "$tracked" "$untracked" > "$output" 2>/dev/null <<'PY'
+import base64
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+patterns = [
+    ("Google API key", r"AIza[0-9A-Za-z_-]{35}"),
+    ("Anthropic API key", r"sk-ant-[A-Za-z0-9_-]{40,}"),
+    ("OpenAI API key", r"sk-proj-[A-Za-z0-9_-]{40,}"),
+    ("Stripe key", r"sk_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{25,}"),
+    ("GitHub token", r"gh[pous]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]+"),
+    ("Supabase token", r"sbp_[a-f0-9]{40}|sb_secret_[A-Za-z0-9_-]+"),
+    ("Slack token", r"xox[baprs]-[A-Za-z0-9-]{20,}"),
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ("Resend API key", r"re_[A-Za-z0-9_]{20,}"),
+    ("AWS access key", r"AKIA[0-9A-Z]{16}"),
+    ("Google OAuth secret", r"GOCSPX-[A-Za-z0-9_-]+"),
+    ("PostgreSQL password URL", r"postgres(?:ql)?://[^\s:/]+:[^\s@]+@[^\s]+"),
+]
+assignment = re.compile(r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*(.*?)\s*$")
+jwt = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+def role(token):
+    try:
+        payload = token.split('.')[1]
+        data = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        return data.get('role') if isinstance(data, dict) else None
+    except (ValueError, TypeError, UnicodeError):
+        return None
+
+def value(raw):
+    raw = re.sub(r'\s+#.*$', '', raw).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+def sample(raw):
+    return not raw or raw.startswith(('op://', 'your-')) or bool(re.fullmatch(r'<[^>]*>', raw))
+
+for kind, source in (("tracked", sys.argv[2]), ("untracked", sys.argv[3])):
+    for rel in dict.fromkeys(os.fsdecode(part) for part in Path(source).read_bytes().split(b'\0') if part):
+        path = Path(rel)
+        if 'node_modules' in path.parts or rel == '/dev/null':
+            continue
+        lines = (repo / path).read_text(encoding='utf-8', errors='replace').splitlines()
+        env = path.name.startswith('.env')
+        template = path.name in ('.env.example', '.env.sample', '.env.tpl')
+        assignments = [(n, value(m.group(1))) for n, text in enumerate(lines, 1) if (m := assignment.match(text))]
+        if template and all(sample(raw) for _, raw in assignments):
+            # 型が直接埋め込まれた行は、テンプレートのコメントでも点検します。
+            template_safe = True
+        else:
+            template_safe = False
+        hits = set()
+        if env:
+            anon_only = bool(assignments) and all(jwt.fullmatch(raw) and role(raw) == 'anon' for _, raw in assignments)
+            if kind == 'tracked' and not template_safe and not anon_only:
+                hits.add((assignments[0][0] if assignments else 1, 'tracked .env file'))
+            for n, raw in assignments:
+                if sample(raw) or (jwt.fullmatch(raw) and role(raw) == 'anon'):
+                    continue
+                hits.add((n, '.env assignment'))
+        for n, text in enumerate(lines, 1):
+            if template_safe and assignment.match(text):
+                continue
+            for label, pattern in patterns:
+                if re.search(pattern, text):
+                    hits.add((n, label))
+            if any(role(m.group()) == 'service_role' for m in jwt.finditer(text)):
+                hits.add((n, 'Supabase service_role JWT'))
+        for n, label in sorted(hits):
+            print(f'{kind}\t{rel}\t{n}\t{label}')
+PY
+  then
+    add_failure "$repo_name — 平文シークレットの検査が異常終了しました"
+    return
+  fi
+  while IFS=$'\t' read -r kind rel line secret_type; do
+    if [ "$secret_type" = 'tracked .env file' ]; then
+      add_failure "$repo_name — .env ファイルが追跡中: ${rel}:${line}（${secret_type}）"
+    elif [ "$kind" = tracked ]; then
+      add_failure "$repo_name — 平文シークレットが commit 済み: ${rel}:${line}（${secret_type}）"
+    else
+      add_failure "$repo_name — 平文シークレットが未追跡かつ gitignore 外: ${rel}:${line}（${secret_type}）"
+    fi
+  done < "$output"
 }
 
 scan_nonstandard_env() {
   local repo="$1" repo_name="$2" file keys modified now days
   for file in "$repo"/.env.*; do
     [ -f "$file" ] || continue
-    is_exempt_env_name "$file" && continue
+    # 追跡中は鍵の点検で扱い、未追跡かつ無視済みのローカル設定は除外します。
+    rh_git -C "$repo" ls-files --error-unmatch -- "${file#"$repo"/}" >/dev/null 2>&1 && continue
+    rh_git -C "$repo" check-ignore -q -- "$file" && continue
+    case "${file##*/}" in .env.local|.env.example|.env.sample|.env.tpl) continue;; esac
     keys="$(LC_ALL=C grep -cE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=.+' "$file" 2>/dev/null || true)"
     is_uint "$keys" || keys=0
     [ "$keys" -gt 0 ] || continue
@@ -295,14 +431,177 @@ scan_nonstandard_env() {
   done
 }
 
+# audit の結果と期限付き据え置きを、指摘単位で照合します。
+audit_counts() {
+  python3 - "$1" "$2" "$VULN_ALLOW_FILE" "$3" "${RH_TODAY:-$(TZ=Asia/Tokyo date '+%Y-%m-%d')}" "${4:-0}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+source, mode, allow_path, repo, today, audit_rc = sys.argv[1:]
+allowed_ids = set()
+legacy = False
+try:
+    for line in Path(allow_path).read_text(encoding='utf-8').splitlines():
+        cols = line.split('\t')
+        if len(cols) < 3 or cols[0] != repo or not re.fullmatch(r'\d{4}-\d\d-\d\d', cols[2]) or cols[2] < today:
+            continue
+        ids = [x.strip() for x in cols[1].split(',')]
+        if all(re.fullmatch(r'(?:GHSA-[A-Za-z0-9-]+|(?:@[a-z0-9._-]+/)?[a-z0-9][a-z0-9._-]*)', x) for x in ids):
+            allowed_ids.update(ids)
+        else:
+            legacy = True
+except FileNotFoundError:
+    pass
+
+def identifiers(name, entry):
+    values = {name}
+    if isinstance(entry, dict):
+        for key in ('name', 'packageName', 'module_name', 'advisoryId', 'id', 'url', 'link', 'github_advisory_id'):
+            if isinstance(entry.get(key), str):
+                values.add(entry[key])
+        for via in entry.get('via', []) if isinstance(entry.get('via'), list) else []:
+            if isinstance(via, dict):
+                values.update(identifiers('', via))
+    for raw in list(values):
+        values.update(re.findall(r'GHSA-[A-Za-z0-9-]+', raw))
+    return values
+
+try:
+    raw = Path(source).read_text(encoding='utf-8')
+    if mode == 'yarn':
+        # yarn berry は advisory ごとの NDJSON（value と children）です。
+        entries_raw = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        normalized = {}
+        for index, record in enumerate(entries_raw):
+            if not isinstance(record, dict):
+                raise ValueError
+            if not record:
+                continue
+            child = record.get('children')
+            if not isinstance(child, dict) or not isinstance(child.get('Severity'), str):
+                raise ValueError
+            normalized[str(index)] = {
+                'module_name': str(record.get('value', '')),
+                'severity': child['Severity'].lower(),
+                'url': str(child.get('URL', '')),
+            }
+        data = {'advisories': normalized}
+    else:
+        data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError
+    if mode == 'bun' and all(isinstance(group, list) for group in data.values()):
+        if not data and audit_rc != '0':
+            raise ValueError
+        normalized = {}
+        for package, group in data.items():
+            for advisory in group:
+                if not isinstance(advisory, dict) or not isinstance(advisory.get('severity'), str):
+                    raise ValueError
+                normalized[str(len(normalized))] = dict(advisory, module_name=package)
+        data = {'advisories': normalized}
+    counts = dict.fromkeys(('critical', 'high', 'moderate', 'low', 'unknown'), 0)
+    entries = []
+    if mode == 'composer':
+        advisories = data.get('advisories')
+        if not isinstance(advisories, (dict, list)):
+            raise ValueError
+        for name, group in (advisories.items() if isinstance(advisories, dict) else enumerate(advisories)):
+            for entry in group if isinstance(group, list) else [group]:
+                if isinstance(entry, dict):
+                    sev = entry.get('severity', 'unknown').lower()
+                    sev = 'moderate' if sev == 'medium' else sev
+                    counts[sev if sev in counts else 'unknown'] += 1
+                    if sev in ('critical', 'high'):
+                        entries.append(identifiers(str(name), entry))
+    else:
+        metadata = data.get('metadata', {}).get('vulnerabilities')
+        vulnerabilities = data.get('vulnerabilities')
+        advisories = data.get('advisories')
+        if isinstance(vulnerabilities, dict):
+            for name, entry in vulnerabilities.items():
+                if not isinstance(entry, dict):
+                    raise ValueError
+                sev = entry.get('severity', 'unknown')
+                counts[sev if sev in counts else 'unknown'] += 1
+                if sev in ('critical', 'high'):
+                    # npm は同じ package の via に別 GHSA をまとめるため、それぞれ照合します。
+                    vias = entry.get('via', [])
+                    if not isinstance(vias, list):
+                        raise ValueError
+                    severe_via = [v for v in vias if not isinstance(v, dict) or v.get('severity') in (None, 'critical', 'high')]
+                    if severe_via:
+                        for via in severe_via:
+                            entries.append(identifiers(name, via) if isinstance(via, dict) else {name})
+                    else:
+                        entries.append(identifiers(name, entry))
+        elif isinstance(advisories, dict):
+            for entry in advisories.values():
+                if not isinstance(entry, dict):
+                    raise ValueError
+                sev = entry.get('severity', 'unknown')
+                counts[sev if sev in counts else 'unknown'] += 1
+                if sev in ('critical', 'high'):
+                    entries.append(identifiers(entry.get('module_name', ''), entry))
+        elif isinstance(metadata, dict) and any(key in metadata for key in ('critical', 'high')):
+            for key in counts:
+                counts[key] = int(metadata.get(key, 0))
+            entries = [set() for _ in range(counts['critical'] + counts['high'])]
+        else:
+            raise ValueError
+        # 一覧が欠けていても集計上の重大な指摘を黙らせません。
+        if isinstance(metadata, dict):
+            if not any(key in metadata for key in ('critical', 'high')):
+                raise ValueError
+            if any(type(value) is not int or value < 0 for key, value in metadata.items() if key in counts):
+                raise ValueError
+            expected = int(metadata.get('critical', 0)) + int(metadata.get('high', 0))
+            entries.extend(set() for _ in range(max(0, expected - len(entries))))
+            for key in counts:
+                counts[key] = max(counts[key], int(metadata.get(key, 0)))
+    accepted = sum(1 for ids in entries if legacy or ids & allowed_ids)
+    print('|'.join(map(str, [counts['critical'], counts['high'], counts['moderate'], counts['low'], counts['unknown'], accepted, len(entries)-accepted, int(legacy)])))
+except (OSError, ValueError, TypeError, AttributeError):
+    pass
+PY
+}
+
+report_audit_counts() {
+  local label="$1" tool="$2" counts="$3" critical high moderate low unknown accepted unmatched legacy
+  IFS='|' read -r critical high moderate low unknown accepted unmatched legacy <<EOF_COUNTS
+$counts
+EOF_COUNTS
+  if [ "$legacy" = 1 ]; then
+    NOTES[${#NOTES[@]}]="$label — 据え置きの形式が古い（GHSA かパッケージ名を書いてください）"
+  fi
+  if [ "$accepted" -gt 0 ]; then
+    NOTES[${#NOTES[@]}]="$label — 本番 critical/high は期限付き据え置き（据え置き ${accepted} 件・据え置き外 ${unmatched} 件）"
+  fi
+  if [ "$unmatched" -gt 0 ]; then
+    add_failure "$label — 本番依存に critical/high 脆弱性（${tool}: ${critical} critical / ${high} high・据え置き ${accepted} 件・据え置き外 ${unmatched} 件）"
+  elif [ "$unknown" -gt 0 ]; then
+    add_warning "$label — $tool に重さ不明の指摘 ${unknown}件"
+  fi
+  add_detail "$label — $tool(prod): ${critical} critical / ${high} high / ${moderate} moderate / ${low} low / ${unknown} unknown"
+}
+
 audit_manifest() {
-  local repo="$1" repo_name="$2" manifest="$3" manifest_dir lock rel label output counts critical high allow_row
+  local repo="$1" repo_name="$2" manifest="$3" manifest_dir rel label output counts tool=npm version audit_rc
+  local -a audit_args
   manifest_dir="$(dirname -- "$manifest")"
-  lock="$manifest_dir/package-lock.json"
   rel="${manifest_dir#"$repo"/}"
   if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$rel"; fi
-  if [ ! -f "$lock" ]; then
-    # 入れ子で lock が無いものは、同梱の部品や教材のひな形（稼働物ではない）として扱う。複数機版と同じ判定
+  if [ -f "$manifest_dir/package-lock.json" ] || [ -f "$manifest_dir/npm-shrinkwrap.json" ]; then
+    audit_args=(audit --omit=dev --package-lock-only --json --fetch-timeout=60000 --fetch-retries=0)
+  elif [ -f "$manifest_dir/pnpm-lock.yaml" ]; then
+    tool=pnpm; audit_args=(audit --prod --json)
+  elif [ -f "$manifest_dir/yarn.lock" ]; then
+    tool=yarn; audit_args=(npm audit --all --recursive --environment production --json)
+  elif [ -f "$manifest_dir/bun.lock" ] || [ -f "$manifest_dir/bun.lockb" ]; then
+    tool=bun; audit_args=(audit --json)
+  else
     if [ "$manifest_dir" = "$repo" ]; then
       add_warning "$label — package.json ありに lockfile なし（監査不能）"
     else
@@ -310,54 +609,50 @@ audit_manifest() {
     fi
     return
   fi
-  if [ "$RH_SKIP_AUDIT" = "1" ]; then
-    add_detail "$label — npm audit は RH_SKIP_AUDIT=1 のため未検査"
+  if [ "$RH_SKIP_AUDIT" = 1 ]; then
+    add_detail "$label — $tool audit は RH_SKIP_AUDIT=1 のため未検査"
     return
   fi
-  if ! command -v npm >/dev/null 2>&1; then
-    add_warning "$label — npm audit 実行不能（npm 不在）"
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    if [ "$tool" = npm ]; then
+      add_warning "$label — npm audit 実行不能（npm 不在）"
+    else
+      NOTES[${#NOTES[@]}]="$label — この lock は npm audit では見られません（${tool} を入れると見られます）"
+    fi
     return
+  fi
+  if [ "$tool" = yarn ]; then
+    version="$(run_timeout 20 yarn --version 2>/dev/null || true)"
+    case "$version" in 0.*|1.*|'')
+      NOTES[${#NOTES[@]}]="$label — この lock は npm audit では見られません（yarn berry を入れると見られます）"
+      return;;
+    esac
   fi
   output="$TMP_DIR/audit-$(streak_key "$manifest").json"
-  (cd "$manifest_dir" && run_timeout 120 npm audit --omit=dev --package-lock-only --json --fetch-timeout=60000 --fetch-retries=0 > "$output" 2>/dev/null) || true
-  counts="$(python3 - "$output" <<'PY'
-import json
-import sys
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        data = json.load(handle)
-    vuln = data.get("metadata", {}).get("vulnerabilities")
-    if not isinstance(vuln, dict):
-        raise ValueError
-    print(f"{int(vuln.get('critical', 0))}|{int(vuln.get('high', 0))}|{int(vuln.get('moderate', 0))}|{int(vuln.get('low', 0))}")
-except (OSError, ValueError, TypeError, json.JSONDecodeError):
-    pass
-PY
-)"
-  if [ -z "$counts" ]; then
-    add_warning "$label — npm audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
+  (cd "$manifest_dir" && run_timeout 120 "$tool" "${audit_args[@]}" > "$output" 2>/dev/null)
+  audit_rc=$?
+  if [ "$audit_rc" -ne 0 ] && [ "$audit_rc" -ne 1 ]; then
+    add_warning "$label — $tool audit 実行不能（異常終了）"
     return
   fi
-  IFS='|' read -r critical high _moderate _low <<EOF
-$counts
-EOF
-  if [ $((critical + high)) -gt 0 ]; then
-    if allow_row="$(vulnerability_allowed "$repo_name")"; then
-      NOTES[${#NOTES[@]}]="$label — 本番 critical/high は期限付き据え置き（${allow_row}）"
-    else
-      add_failure "$label — 本番依存に critical/high 脆弱性（${critical} critical / ${high} high）"
-    fi
+  if [ "$tool" = yarn ] && [ "$audit_rc" -ne 0 ] && [ ! -s "$output" ]; then
+    add_warning "$label — $tool audit 実行不能（応答なし）"
+    return
   fi
-  add_detail "$label — npm audit(prod): ${critical} critical / ${high} high / ${_moderate} moderate / ${_low} low"
+  counts="$(audit_counts "$output" "$tool" "$repo_name" "$audit_rc")"
+  if [ -z "$counts" ]; then
+    add_warning "$label — $tool audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
+    return
+  fi
+  report_audit_counts "$label" "$tool audit" "$counts"
 }
 
 audit_composer_lock() {
-  local repo="$1" repo_name="$2" lock="$3" manifest_dir rel label output counts
-  local critical high medium low unknown allow_row composer_path
+  local repo="$1" repo_name="$2" lock="$3" manifest_dir rel label output counts composer_path
   manifest_dir="$(dirname -- "$lock")"
   rel="${manifest_dir#"$repo"/}"
   if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$rel"; fi
-  if [ "$RH_SKIP_AUDIT" = "1" ]; then
+  if [ "$RH_SKIP_AUDIT" = 1 ]; then
     add_detail "$label — composer audit は RH_SKIP_AUDIT=1 のため未検査"
     return
   fi
@@ -367,50 +662,13 @@ audit_composer_lock() {
     return
   fi
   output="$TMP_DIR/composer-audit-$(streak_key "$lock").json"
-  (cd "$manifest_dir" && run_timeout 120 "$composer_path" audit --locked --no-dev --format=json --no-interaction > "$output" 2>/dev/null) || true
-  counts="$(python3 - "$output" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        data = json.load(handle)
-    advisories = data.get("advisories")
-    if not isinstance(advisories, (dict, list)):
-        raise ValueError
-    entries = []
-    values = advisories.values() if isinstance(advisories, dict) else advisories
-    for value in values:
-        if isinstance(value, list):
-            entries.extend(item for item in value if isinstance(item, dict))
-        elif isinstance(value, dict):
-            entries.append(value)
-    counts = {key: 0 for key in ("critical", "high", "medium", "low", "unknown")}
-    for advisory in entries:
-        severity = str(advisory.get("severity", "")).lower()
-        counts[severity if severity in counts else "unknown"] += 1
-    print("|".join(str(counts[key]) for key in ("critical", "high", "medium", "low", "unknown")))
-except (OSError, ValueError, TypeError, json.JSONDecodeError):
-    pass
-PY
-)"
+  (cd "$manifest_dir" && run_timeout 120 "$composer_path" --no-plugins --no-scripts audit --locked --no-dev --format=json --no-interaction > "$output" 2>/dev/null) || true
+  counts="$(audit_counts "$output" composer "$repo_name")"
   if [ -z "$counts" ]; then
     add_warning "$label — composer audit 実行不能（timeout・ネットワーク・応答不正のいずれか）"
     return
   fi
-  IFS='|' read -r critical high medium low unknown <<EOF
-$counts
-EOF
-  if [ $((critical + high)) -gt 0 ]; then
-    if allow_row="$(vulnerability_allowed "$repo_name")"; then
-      NOTES[${#NOTES[@]}]="$label — 本番 critical/high は期限付き据え置き（${allow_row}）"
-    else
-      add_failure "$label — 本番依存に critical/high 脆弱性（composer）"
-    fi
-  elif [ "$unknown" -gt 0 ]; then
-    add_warning "$label — composer audit に重さ不明の指摘 ${unknown}件"
-  fi
-  add_detail "$label — composer audit(prod): ${critical} critical / ${high} high / ${medium} medium / ${low} low / ${unknown} unknown"
+  report_audit_counts "$label" 'composer audit' "$counts"
 }
 
 scan_manifests() {
@@ -420,7 +678,7 @@ scan_manifests() {
   [ -f "$repo/package.json" ] && printf '%s\0' "$repo/package.json" >> "$list"
   while IFS= read -r -d '' manifest; do
     printf '%s\0' "$repo/$manifest" >> "$list"
-  done < <(git -C "$repo" -c core.quotepath=false ls-files -z -- '*/package.json' 2>/dev/null)
+  done < <(rh_git -C "$repo" -c core.quotepath=false ls-files -z -- '*/package.json' 2>/dev/null)
   while IFS= read -r -d '' manifest; do
     audit_manifest "$repo" "$repo_name" "$manifest"
   done < "$list"
@@ -430,7 +688,7 @@ scan_manifests() {
   [ -f "$repo/composer.lock" ] && printf '%s\0' "$repo/composer.lock" >> "$composer_list"
   while IFS= read -r -d '' manifest; do
     printf '%s\0' "$repo/$manifest" >> "$composer_list"
-  done < <(git -C "$repo" -c core.quotepath=false ls-files -z -- '*/composer.lock' 2>/dev/null)
+  done < <(rh_git -C "$repo" -c core.quotepath=false ls-files -z -- '*/composer.lock' 2>/dev/null)
   while IFS= read -r -d '' manifest; do
     audit_composer_lock "$repo" "$repo_name" "$manifest"
   done < "$composer_list"
@@ -451,10 +709,11 @@ $line
 EOF
     case "$prefix" in
       DENY) add_failure "$hit_repo — 侵害パッケージが入っています: ${package}（${reason}・${lock}）" ;;
+      DENYWARN) add_warning "$repo_name — $lock は未照合（${package}）" ;;
       DENYSKIP) add_failure "$repo_name — 侵害パッケージ照合が動いていません: $lock" ;;
     esac
   done < "$output"
-  if [ "$rc" -eq 2 ] && [ ! -s "$output" ]; then
+  if { [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; } || { [ "$rc" -eq 1 ] && [ ! -s "$output" ]; }; then
     add_failure "$repo_name — 侵害パッケージ照合が異常終了しました"
   fi
 }
@@ -486,7 +745,7 @@ if not deny:
     raise SystemExit(2)
 
 result = subprocess.run(
-    ["git", "-c", "core.quotepath=false", "ls-files", "-z"],
+    ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=ssh", "-c", "core.quotepath=false", "ls-files", "-z"],
     cwd=repo,
     capture_output=True,
     timeout=30,
@@ -542,7 +801,7 @@ EOF
 
 check_git_size() {
   local repo="$1" repo_name="$2" git_dir kb mb size_file previous growth
-  git_dir="$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || return
+  git_dir="$(rh_git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || return
   kb="$(du -sk "$git_dir" 2>/dev/null | awk '{print $1}')"
   is_uint "$kb" || kb=0
   mb=$((kb / 1024))
@@ -596,13 +855,13 @@ check_repo() {
   local ff_ok git_status_count origin_url
   repo_name="$(clean_text "$(basename -- "$repo")")"
 
-  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  if ! rh_git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
     add_failure "$repo_name — git repo 破損（rev-parse 不能）"
     return
   fi
 
   fetch="OK"
-  origin_url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+  origin_url="$(rh_git -C "$repo" remote get-url origin 2>/dev/null || true)"
   if [ -z "$origin_url" ]; then
     fetch="NOREMOTE"
     add_warning "$repo_name — origin 未設定"
@@ -611,8 +870,8 @@ check_repo() {
     if [ "$RH_SKIP_FETCH" = "1" ]; then
       fetch="SKIP"
       add_detail "$repo_name — fetch は RH_SKIP_FETCH=1 のため未検査"
-    elif run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
-      || { sleep 3; run_timeout 90 git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
+    elif run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
+      || { sleep 3; run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
       streak_reset "fetch-$repo_name"
     else
       fetch="NG"
@@ -625,7 +884,7 @@ check_repo() {
     fi
   fi
 
-  branch="$(git -C "$repo" symbolic-ref -q --short HEAD 2>/dev/null || printf 'DETACHED')"
+  branch="$(rh_git -C "$repo" symbolic-ref -q --short HEAD 2>/dev/null || printf 'DETACHED')"
   branch="$(clean_text "$branch")"
   if [ "$branch" = "DETACHED" ]; then add_failure "$repo_name — detached HEAD"; fi
 
@@ -640,9 +899,9 @@ check_repo() {
 
   ahead="-"; behind="-"
   if [ "$branch" != "DETACHED" ]; then
-    if upstream="$(git -C "$repo" rev-parse --abbrev-ref '@{u}' 2>/dev/null)"; then
-      ahead="$(git -C "$repo" rev-list --count '@{u}..HEAD' 2>/dev/null || printf '?')"
-      behind="$(git -C "$repo" rev-list --count 'HEAD..@{u}' 2>/dev/null || printf '?')"
+    if upstream="$(rh_git -C "$repo" rev-parse --abbrev-ref '@{u}' 2>/dev/null)"; then
+      ahead="$(rh_git -C "$repo" rev-list --count '@{u}..HEAD' 2>/dev/null || printf '?')"
+      behind="$(rh_git -C "$repo" rev-list --count 'HEAD..@{u}' 2>/dev/null || printf '?')"
     else
       upstream=""
       ahead="NOUP"; behind="NOUP"
@@ -651,17 +910,17 @@ check_repo() {
   fi
   if is_uint "$ahead" && [ "$ahead" -gt 0 ]; then add_warning "$repo_name — 未push $ahead 件"; fi
 
-  git_status_count="$(git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  git_status_count="$(rh_git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
   is_uint "$git_status_count" || git_status_count=0
   dirty="$git_status_count"
-  stash="$(git -C "$repo" stash list 2>/dev/null | wc -l | tr -d ' ')"
+  stash="$(rh_git -C "$repo" stash list 2>/dev/null | wc -l | tr -d ' ')"
   is_uint "$stash" || stash=0
 
   if [ "$RH_AUTOFIX_PULL" = "1" ] && [ "$dirty" -eq 0 ] && [ "$stash" -eq 0 ] \
     && is_uint "$ahead" && [ "$ahead" -eq 0 ] && is_uint "$behind" && [ "$behind" -gt 0 ]; then
-    if run_timeout 90 git -C "$repo" pull --ff-only --quiet >/dev/null 2>&1; then
+    if run_timeout 90 rh_git -C "$repo" pull --ff-only --quiet >/dev/null 2>&1; then
       AUTOFIXED[${#AUTOFIXED[@]}]="$repo_name — behind ${behind}件を ff で解消"
-      behind="$(git -C "$repo" rev-list --count 'HEAD..@{u}' 2>/dev/null || printf '0')"
+      behind="$(rh_git -C "$repo" rev-list --count 'HEAD..@{u}' 2>/dev/null || printf '0')"
     else
       add_warning "$repo_name — behind ${behind}件の自動 ff pull に失敗"
     fi
@@ -693,10 +952,10 @@ check_repo() {
 
   base=""
   for upstream in origin/HEAD origin/main origin/master; do
-    if git -C "$repo" rev-parse -q --verify "$upstream" >/dev/null 2>&1; then base="$upstream"; break; fi
+    if rh_git -C "$repo" rev-parse -q --verify "$upstream" >/dev/null 2>&1; then base="$upstream"; break; fi
   done
   if [ "$fetch" != "NOREMOTE" ] && [ -n "$base" ]; then
-    unmerged="$(git -C "$repo" for-each-ref --format='%(refname)' --no-merged "$base" refs/remotes/origin 2>/dev/null | LC_ALL=C grep -cv '^refs/remotes/origin/HEAD$' || true)"
+    unmerged="$(rh_git -C "$repo" for-each-ref --format='%(refname)' --no-merged "$base" refs/remotes/origin 2>/dev/null | LC_ALL=C grep -cv '^refs/remotes/origin/HEAD$' || true)"
     is_uint "$unmerged" || unmerged=0
     [ "$unmerged" -gt 0 ] && add_warning "$repo_name — 未マージ remote ブランチ $unmerged 本"
   fi
@@ -1294,9 +1553,118 @@ EOF
   done < "$formulas.sorted"
 }
 
+brew_formula_is_security() {
+  local formula="$1" pattern
+  [ -f "$SECURITY_PACKAGES" ] || return 1
+  while IFS= read -r pattern; do
+    case "$pattern" in ''|\#*) continue;; esac
+    # shellcheck disable=SC2254  # 設定表の node@* などを glob として照合します。
+    case "$formula" in $pattern) return 0;; esac
+  done < "$SECURITY_PACKAGES"
+  return 1
+}
+
+brew_revision_only() {
+  local old="$1" latest="$2" version revision old_revision
+  local -a versions
+  IFS=',' read -r -a versions <<EOF
+$old
+EOF
+  [ "${#versions[@]}" -gt 0 ] || return 1
+  case "$latest" in
+    *_*) revision="${latest##*_}"; is_uint "$revision" || return 1;;
+    *) return 1;;
+  esac
+  for version in "${versions[@]}"; do
+    [ "${version%_*}" = "${latest%_*}" ] || return 1
+    old_revision=0
+    case "$version" in *_*) old_revision="${version##*_}"; is_uint "$old_revision" || return 1;; esac
+    [ "$revision" -gt "$old_revision" ] || return 1
+  done
+  return 0
+}
+
+brew_snapshot() {
+  if run_timeout 30 brew list --versions > "$1" 2>/dev/null; then return 0; fi
+  NOTES[${#NOTES[@]}]="Homebrew の導入済み版を取得できず未検査"
+  return 1
+}
+
+# 名指し以外の更新も記録し、後の linkage 点検へ渡します。
+brew_record_changes() {
+  local before="$1" after="$2" requested="$3" suffix="${4-}" name old new detail
+  local changes="$TMP_DIR/brew-version-changes.tsv"
+  python3 -I - "$before" "$after" > "$changes" 2>/dev/null <<'PY'
+import sys
+def read(path):
+    result = {}
+    with open(path, encoding="utf-8") as handle:
+        for raw in handle:
+            parts = raw.split()
+            if len(parts) >= 2:
+                result[parts[0]] = ",".join(parts[1:])
+    return result
+before, after = (read(path) for path in sys.argv[1:])
+for name, new in after.items():
+    old = before.get(name, "未導入")
+    if new != old:
+        print(f"{name}\t{old}\t{new}")
+PY
+  while IFS=$'\t' read -r name old new; do
+    detail="$suffix"
+    if ! grep -Fqx "$name" "$requested"; then detail="（巻き込みで更新）"; fi
+    AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: $name $old → $new${detail}"
+    printf '%s\n' "$name" >> "$TMP_DIR/brew-updated.list"
+  done < "$changes"
+}
+
+brew_prepare_pins() {
+  local output="$TMP_DIR/brew-pinned.list"
+  [ -f "$output" ] && return
+  if ! run_timeout 30 brew list --pinned > "$output" 2>/dev/null; then
+    rm -f "$output"
+    NOTES[${#NOTES[@]}]="Homebrew の pin 一覧を取得できず未検査"
+    return 1
+  fi
+}
+
+brew_formula_is_protected() {
+  local name="$1"
+  software_is_ignored "$name" && return 0
+  if [ -f "$TMP_DIR/brew-pinned.list" ] && grep -Fqx "$name" "$TMP_DIR/brew-pinned.list"; then return 0; fi
+  if [ "$RH_AUTOFIX_SECURITY" != "1" ] && brew_formula_is_security "$name"; then
+    # 今回、安全に当てた同じ版の改訂は依存先にも使えます。
+    if [ -f "$TMP_DIR/brew-revision-fixed.list" ] && grep -Fqx "$name" "$TMP_DIR/brew-revision-fixed.list"; then return 1; fi
+    return 0
+  fi
+  return 1
+}
+
+brew_formula_safe_to_upgrade() {
+  local name="$1" dependency
+  local deps="$TMP_DIR/brew-deps.list" uses="$TMP_DIR/brew-uses.list"
+  brew_prepare_pins || return 1
+  if ! run_timeout 30 brew uses --installed --recursive "$name" > "$uses" 2>/dev/null \
+    || ! run_timeout 30 brew deps --installed "$name" > "$deps" 2>/dev/null; then
+    NOTES[${#NOTES[@]}]="Homebrew の ${name} の依存関係を取得できず自動更新は未検査"
+    return 1
+  fi
+  while IFS= read -r dependency; do
+    [ -n "$dependency" ] || continue
+    if brew_formula_is_protected "$dependency"; then
+      add_warning "$name は $dependency を一緒に上げるため自動更新しませんでした"
+      return 1
+    fi
+  done < "$deps"
+  # 呼び出し側では依存元の保護を常に有効にします。uses は修復の対象一覧にも使います。
+  return 0
+}
+
 check_brew_security() {
-  local outdated_json rows remaining name installed latest description failed_description
-  local upgrade_description brew_prefix item installed_version
+  local outdated_json rows remaining name installed latest description brew_prefix item installed_version pinned
+  local before="$TMP_DIR/brew-security-before.list" after="$TMP_DIR/brew-security-after.list"
+  local requested="$TMP_DIR/brew-security-requested.list" pending="$TMP_DIR/brew-security-pending.list"
+  local revision suffix attempt
   local -a installed_versions
   command -v brew >/dev/null 2>&1 || return
   if ! run_timeout 300 brew update --quiet >/dev/null 2>&1; then
@@ -1313,18 +1681,14 @@ check_brew_security() {
     return
   fi
   rows="$TMP_DIR/brew-security.tsv"
-  if ! python3 - "$outdated_json" "$SECURITY_PACKAGES" > "$rows" 2>/dev/null <<'PY'
+  if ! python3 - "$outdated_json" "$SECURITY_PACKAGES" > "$rows" 2>/dev/null <<'PYSEC'
+import fnmatch
 import json
 import sys
-
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
-patterns = []
 with open(sys.argv[2], encoding="utf-8") as handle:
-    for raw in handle:
-        value = raw.strip()
-        if value and not value.startswith("#"):
-            patterns.append(value)
+    patterns = [raw.strip() for raw in handle if raw.strip() and not raw.startswith("#")]
 formulae = data.get("formulae")
 if not isinstance(formulae, list):
     raise SystemExit(1)
@@ -1332,65 +1696,69 @@ for formula in formulae:
     if not isinstance(formula, dict):
         continue
     name = str(formula.get("name", ""))
-    if not any(name.startswith(item[:-1]) if item.endswith("*") else name == item for item in patterns):
+    if not any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
         continue
     installed = formula.get("installed_versions", [])
     old = ",".join(str(item) for item in installed) if isinstance(installed, list) else str(installed)
     new = formula.get("current_version") or formula.get("stable") or "不明"
-    print(f"{name}\t{old or '不明'}\t{new}")
-PY
+    print(f"{name}\t{old or '不明'}\t{new}\t{int(bool(formula.get('pinned')))}")
+PYSEC
   then
     NOTES[${#NOTES[@]}]="Homebrew のセキュリティ部品は応答不正のため未検査"
     return
   fi
-  if [ ! -s "$rows" ]; then
+  remaining="$TMP_DIR/brew-security-remaining.tsv"
+  : > "$remaining"
+  brew_prepare_pins || return
+  while IFS=$'\t' read -r name installed latest pinned; do
+    if [ "$pinned" = "1" ] || grep -Fqx "$name" "$TMP_DIR/brew-pinned.list"; then
+      NOTES[${#NOTES[@]}]="Homebrew の ${name} は pin 中（brew unpin ${name} で更新対象に戻せます）"
+      continue
+    fi
+    revision=0; suffix=""; attempt=0
+    if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] && brew_revision_only "$installed" "$latest"; then
+      revision=1; suffix="（同じ版の作り直し）"; attempt=1
+    fi
+    [ "$RH_AUTOFIX_SECURITY" != "1" ] || attempt=1
+    if [ "$name" = "ca-certificates" ] && [ "$RH_AUTOFIX_CA_CERTS" = "1" ]; then attempt=1; fi
+    if [ "$attempt" = "1" ] && ! software_is_ignored "$name" \
+      && brew_formula_safe_to_upgrade "$name" && brew_snapshot "$before"; then
+      printf '%s\n' "$name" > "$requested"
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+        run_timeout 900 brew upgrade "$name" >/dev/null 2>&1 || true
+      if brew_snapshot "$after"; then brew_record_changes "$before" "$after" "$requested" "$suffix"; fi
+      if run_timeout 300 brew outdated --json=v2 > "$outdated_json" 2>/dev/null \
+        && python3 -I - "$outdated_json" > "$pending" 2>/dev/null <<'PYPENDING'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+if not isinstance(data.get("formulae"), list):
+    raise SystemExit(1)
+for formula in data["formulae"]:
+    print(formula["name"])
+PYPENDING
+      then
+        if ! grep -Fqx "$name" "$pending"; then
+          if [ "$revision" = "1" ]; then printf '%s\n' "$name" >> "$TMP_DIR/brew-revision-fixed.list"; fi
+          continue
+        fi
+      else
+        NOTES[${#NOTES[@]}]="Homebrew の ${name} は更新後の確認ができず未検査"
+      fi
+      add_warning "$name の自動更新に失敗しました（brew upgrade を手で実行してください）"
+    fi
+    printf '%s\t%s\t%s\n' "$name" "$installed" "$latest" >> "$remaining"
+  done < "$rows"
+  if [ ! -s "$remaining" ]; then
     security_detail "Homebrew のセキュリティ部品は更新待ちなし"
     return
   fi
-
-  remaining="$TMP_DIR/brew-security-remaining.tsv"
-  : > "$remaining"
-  failed_description=""
-  while IFS=$'\t' read -r name installed latest; do
-    if [ "$name" = "ca-certificates" ] && [ "$RH_AUTOFIX_CA_CERTS" = "1" ]; then
-      # 名指しした部品だけを上げる（Homebrew は既定で、依存する別の部品の更新も一緒に行うため）
-      if HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 600 brew upgrade ca-certificates >/dev/null 2>&1; then
-        AUTOFIXED[${#AUTOFIXED[@]}]="ca-certificates — 証明書リスト ${installed} → ${latest} を自動更新"
-      else
-        failed_description="ca-certificates の自動更新に失敗しました（brew upgrade を手で実行してください）"
-      fi
-    else
-      printf '%s\t%s\t%s\n' "$name" "$installed" "$latest" >> "$remaining"
-    fi
-  done < "$rows"
-  [ -z "$failed_description" ] || add_warning "$failed_description"
-  [ -s "$remaining" ] || return
-
-  if [ "$RH_AUTOFIX_SECURITY" = "1" ]; then
-    set --
-    while IFS=$'\t' read -r name _installed _latest; do
-      set -- "$@" "$name"
-    done < "$remaining"
-    if HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 900 brew upgrade "$@" >/dev/null 2>&1; then
-      while IFS=$'\t' read -r name installed latest; do
-        AUTOFIXED[${#AUTOFIXED[@]}]="$name — セキュリティ部品 $installed → $latest を自動更新"
-      done < "$remaining"
-      return
-    fi
-    upgrade_description=""
-    while IFS=$'\t' read -r name _installed _latest; do
-      if [ -z "$upgrade_description" ]; then upgrade_description="$name"; else upgrade_description="${upgrade_description}、$name"; fi
-    done < "$remaining"
-    add_warning "$upgrade_description の自動更新に失敗しました（brew upgrade を手で実行してください）"
-    return
-  fi
-
   description=""
   : > "$TMP_DIR/brew-security-warned.list"
   : > "$TMP_DIR/brew-security-warned-items.tsv"
   while IFS=$'\t' read -r name installed latest; do
     item="$name $installed → $latest"
-    # 最低版リスト（brew:<formula>）に載る formula が修正版より古いときは、同じ話を 2 度 WARN にせず、理由をここに添える
     IFS=',' read -r -a installed_versions <<EOF
 $installed
 EOF
@@ -1402,15 +1770,11 @@ EOF
     done
     printf '%s\n' "$name" >> "$TMP_DIR/brew-security-warned.list"
     printf '%s\t%s\n' "$name" "$item" >> "$TMP_DIR/brew-security-warned-items.tsv"
-    if [ -z "$description" ]; then
-      description="$item"
-    else
-      description="${description}、$item"
-    fi
+    if [ -z "$description" ]; then description="$item"; else description="${description}、$item"; fi
   done < "$remaining"
   printf '%s\n' "${#WARNINGS[@]}" > "$TMP_DIR/brew-security-warning-index"
   add_warning "Mac のセキュリティ部品に更新が出ています: ${description}（brew upgrade で更新できます）"
-  brew_prefix="$(brew --prefix 2>/dev/null || true)"
+  brew_prefix="$(run_timeout 30 brew --prefix 2>/dev/null || true)"
   [ -z "$brew_prefix" ] || security_detail "Homebrew: $brew_prefix"
 }
 
@@ -2552,7 +2916,10 @@ check_installed_software() {
   local npm_rows="$TMP_DIR/software-npm.tsv" state_file="$STATE_DIR/software-outdated.tsv"
   local state_new="$TMP_DIR/software-state.tsv" dated_rows="$TMP_DIR/software-dated.tsv"
   local kind name installed latest remedy key display auto_updates has_app present app_version
-  local target wait_suffix package current days today failed_names item
+  local target wait_suffix package current days today item
+  local failed_names="" eligible="$TMP_DIR/software-auto-eligible.tsv"
+  local before="$TMP_DIR/software-before.list" after="$TMP_DIR/software-after.list"
+  local requested="$TMP_DIR/software-requested.list" snapshot_ok=0
   local mas_cmd
   local homebrew_checked=0 app_checked=0 mas_checked=0 npm_checked=0 mas_installed=0
   local attempted_upgrade=0 formula_rc=0 cask_rc=0 app_candidates=0
@@ -2602,6 +2969,7 @@ PY
         [ "$kind" = "formula" ] || continue
         software_is_ignored "$name" && continue
         software_is_cli_managed formula "$name" && continue
+        if [ "$RH_AUTOFIX_SECURITY" != "1" ] && brew_formula_is_security "$name"; then continue; fi
         # セキュリティ部品として ① に WARN 済みのものは、③ に重ねて出さず自動更新もしない
         if [ -s "$TMP_DIR/brew-security-warned.list" ] && grep -Fqx "$name" "$TMP_DIR/brew-security-warned.list"; then
           continue
@@ -2964,14 +3332,29 @@ PY
   fi
 
   if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] && [ -s "$auto_candidates" ]; then
+    : > "$eligible"
+    : > "$requested"
+    while IFS=$'\t' read -r key kind name installed latest; do
+      if [ "$kind" = "formula" ]; then
+        brew_formula_safe_to_upgrade "$name" || continue
+        printf '%s\n' "$name" >> "$requested"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$key" "$kind" "$name" "$installed" "$latest" >> "$eligible"
+    done < "$auto_candidates"
+    cp "$eligible" "$auto_candidates"
     set --
     while IFS=$'\t' read -r _key kind name _installed _latest; do
       [ "$kind" = "formula" ] || continue
       set -- "$@" "$name"
     done < "$auto_candidates"
     if [ "$#" -gt 0 ]; then
-      attempted_upgrade=1
-      HOMEBREW_NO_INSTALL_CLEANUP=1 run_timeout 900 brew upgrade --formula "$@" >/dev/null 2>&1 || formula_rc=$?
+      if brew_snapshot "$before"; then
+        snapshot_ok=1
+        attempted_upgrade=1
+        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+          run_timeout 900 brew upgrade --formula "$@" >/dev/null 2>&1 || formula_rc=$?
+        if brew_snapshot "$after"; then brew_record_changes "$before" "$after" "$requested"; fi
+      fi
     fi
     set --
     while IFS=$'\t' read -r _key kind name _installed _latest; do
@@ -3002,7 +3385,7 @@ PY
           if [ -z "$failed_names" ]; then failed_names="$name"; else failed_names="$failed_names $name"; fi
         else
           printf '%s\n' "$key" >> "$fixed_keys"
-          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: $name $installed → $latest"
+          if [ "$kind" = "cask" ]; then AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: $name $installed → $latest"; fi
         fi
       done < "$auto_candidates"
       [ -z "$failed_names" ] || add_warning "Homebrew の自動更新に失敗: $failed_names"
@@ -3013,7 +3396,7 @@ PY
       [ -z "$failed_names" ] || add_warning "Homebrew の自動更新に失敗: $failed_names"
     fi
   fi
-  : "$formula_rc" "$cask_rc"
+  : "$formula_rc" "$cask_rc" "$snapshot_ok"
 
   : > "$filtered_updates"
   while IFS=$'\t' read -r key kind display installed latest remedy; do
@@ -3081,12 +3464,109 @@ node_keg_is_healthy() {
   [ "$output" = "rh-node-ok" ]
 }
 
+brew_linkage_is_healthy() {
+  local formula="$1" remaining limit start rc
+  : "${BREW_LINKAGE_USED:=0}"
+  remaining=$((600 - BREW_LINKAGE_USED))
+  if [ "$remaining" -le 0 ]; then
+    NOTES[${#NOTES[@]}]="Homebrew の ${formula} の linkage は合計制限時間を超えたため未検査"
+    return 2
+  fi
+  limit=60
+  [ "$remaining" -ge "$limit" ] || limit="$remaining"
+  start=$SECONDS
+  run_timeout "$limit" brew linkage --test "$formula" >/dev/null 2>&1
+  rc=$?
+  BREW_LINKAGE_USED=$((BREW_LINKAGE_USED + SECONDS - start))
+  case "$rc" in
+    0) return 0;;
+    124|137|142)
+      NOTES[${#NOTES[@]}]="Homebrew の ${formula} の linkage は制限時間を超えたため未検査"
+      return 2;;
+    *) return 1;;
+  esac
+}
+
+brew_repair_health() {
+  if [ "$1" = "node" ]; then node_keg_is_healthy "$2"; else brew_linkage_is_healthy "$2"; fi
+}
+
+brew_repair_formula() {
+  local formula="$1" kind="$2" target="$3" old new rc
+  local before="$TMP_DIR/brew-repair-before.list" after="$TMP_DIR/brew-repair-after.list"
+  local requested="$TMP_DIR/brew-repair-requested.list" attempts="$TMP_DIR/brew-repair-attempted.list"
+  brew_prepare_pins || return 1
+  software_is_ignored "$formula" && return 1
+  if grep -Fqx "$formula" "$TMP_DIR/brew-pinned.list"; then return 1; fi
+  brew_formula_safe_to_upgrade "$formula" || return 1
+  [ ! -f "$attempts" ] || ! grep -Fqx "$formula" "$attempts" || return 1
+  printf '%s\n' "$formula" >> "$attempts"
+  brew_snapshot "$before" || return 1
+  old="$(run_timeout 30 brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
+  HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+    run_timeout 900 brew upgrade "$formula" >/dev/null 2>&1 || true
+  brew_repair_health "$kind" "$target"; rc=$?
+  if [ "$rc" -eq 1 ]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 \
+      run_timeout 900 brew reinstall "$formula" >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$formula" > "$requested"
+  if brew_snapshot "$after"; then brew_record_changes "$before" "$after" "$requested" "（部品の更新のあと動かなくなったため修復）"; fi
+  if brew_repair_health "$kind" "$target"; then
+    new="$(run_timeout 30 brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
+    if [ "$old" = "$new" ]; then
+      AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: ${formula} ${new} を入れ直し（部品の更新のあと動かなくなったため作り直し版へ）"
+    fi
+    printf '%s\n' "$formula" >> "$TMP_DIR/brew-health-repaired.list"
+    printf '%s\n' "$formula" >> "$TMP_DIR/node-health-fixed.list"
+    printf '%s\n' "$formula" >> "$TMP_DIR/brew-updated.list"
+    return 0
+  fi
+  return 1
+}
+
+check_updated_formula_linkage() {
+  local name dependent rc found
+  local updated="$TMP_DIR/brew-updated.list" candidates="$TMP_DIR/brew-linkage-candidates.list"
+  local seen="$TMP_DIR/brew-linkage-seen.list" uses="$TMP_DIR/brew-linkage-uses.list"
+  [ -s "$updated" ] || return
+  : > "$seen"
+  while :; do
+    : > "$candidates"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      printf '%s\n' "$name" >> "$candidates"
+      if run_timeout 30 brew uses --installed --recursive "$name" > "$uses" 2>/dev/null; then
+        cat "$uses" >> "$candidates"
+      else
+        NOTES[${#NOTES[@]}]="Homebrew の ${name} の依存元を取得できず linkage は未検査"
+      fi
+    done < "$updated"
+    LC_ALL=C sort -u "$candidates" > "$candidates.sorted"
+    found=0
+    while IFS= read -r dependent; do
+      [ -n "$dependent" ] || continue
+      grep -Fqx "$dependent" "$seen" && continue
+      printf '%s\n' "$dependent" >> "$seen"
+      found=1
+      brew_linkage_is_healthy "$dependent"; rc=$?
+      [ "$rc" -eq 1 ] || continue
+      if { [ "$RH_AUTOFIX_SOFTWARE" != "1" ] && [ "$RH_AUTOFIX_SECURITY" != "1" ]; } \
+        || ! brew_repair_formula "$dependent" linkage "$dependent"; then
+        add_warning "Homebrew の ${dependent} の部品のつながりが壊れています（brew reinstall ${dependent} を試してください）"
+      fi
+    done < "$candidates.sorted"
+    [ "$found" = "1" ] || break
+    [ "${BREW_LINKAGE_USED:-0}" -lt 600 ] || break
+  done
+}
+
 refresh_brew_security_warning() {
   local outdated="$TMP_DIR/node-health-outdated.json" pending="$TMP_DIR/node-health-outdated.list"
   local name item description="" index i
   local -a refreshed
   [ -s "$TMP_DIR/brew-security-warned-items.tsv" ] || return
-  # 取得できなければ元の WARN を保ち、起動を再確認できた formula だけを除く。
+  # 取得できなければ元の WARN を保ち、取得できたときだけ更新済みのものを除きます。
   : > "$pending"
   if run_timeout 300 brew outdated --json=v2 > "$outdated" 2>/dev/null \
     && python3 -I - "$outdated" > "$pending" 2>/dev/null <<'PY'
@@ -3110,7 +3590,7 @@ PY
   fi
   : > "$TMP_DIR/brew-security-warned.list"
   while IFS=$'\t' read -r name item; do
-    if grep -Fqx "$name" "$TMP_DIR/node-health-fixed.list" || ! grep -Fqx "$name" "$pending"; then
+    if ! grep -Fqx "$name" "$pending"; then
       continue
     fi
     printf '%s\n' "$name" >> "$TMP_DIR/brew-security-warned.list"
@@ -3131,40 +3611,45 @@ PY
 }
 
 check_node_kegs_health() {
-  local formula prefix bin before after
+  local formula prefix bin pass repair_count=0
   local formulas="$TMP_DIR/node-health-formulae.list" health_dir="$TMP_DIR/node-health"
   command -v brew >/dev/null 2>&1 || return
-  run_timeout 300 brew list --formula -1 > "$formulas" 2>/dev/null || return
-  LC_ALL=C grep -Eq '^node(@[0-9]+)?$' "$formulas" || return
+  if ! run_timeout 30 brew list --formula -1 > "$formulas" 2>/dev/null; then
+    NOTES[${#NOTES[@]}]="Homebrew の node 一覧を取得できず起動確認は未検査"
+    refresh_brew_security_warning
+    return
+  fi
   mkdir -p "$health_dir"
   printf '%s\n' '{"name":"rh-node-health","version":"0.0.0","type":"commonjs"}' > "$health_dir/package.json"
   printf '%s\n' 'console.log("rh-node-ok")' > "$health_dir/check.js"
-  : > "$TMP_DIR/node-health-fixed.list"
-  while IFS= read -r formula; do
-    [[ "$formula" =~ ^node(@[0-9]+)?$ ]] || continue
-    prefix="$(run_timeout 20 brew --prefix "$formula" 2>/dev/null)" || continue
-    bin="$prefix/bin/node"
-    [ -x "$bin" ] || continue
-    node_keg_is_healthy "$bin" && continue
-    if [ "$RH_AUTOFIX_SOFTWARE" = "1" ] || [ "$RH_AUTOFIX_SECURITY" = "1" ]; then
-      before="$(brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
-      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 run_timeout 900 brew upgrade "$formula" >/dev/null 2>&1 || true
-      if ! node_keg_is_healthy "$bin"; then
-        HOMEBREW_NO_AUTO_UPDATE=1 run_timeout 900 brew reinstall "$formula" >/dev/null 2>&1 || true
-      fi
-      if node_keg_is_healthy "$bin"; then
-        after="$(brew list --versions "$formula" 2>/dev/null | cut -d ' ' -f 2-)"
-        if [ "$before" = "$after" ]; then
-          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: ${formula} ${after} を入れ直し（部品の更新のあと起動しなくなったため作り直し版へ）"
-        else
-          AUTOFIXED[${#AUTOFIXED[@]}]="Homebrew: ${formula} ${before} → ${after}（部品の更新のあと起動しなくなったため作り直し版へ）"
-        fi
-        printf '%s\n' "$formula" >> "$TMP_DIR/node-health-fixed.list"
+  touch "$TMP_DIR/node-health-fixed.list"
+  for pass in 1 2 3; do
+    if [ "$pass" = "2" ] && [ "$repair_count" -eq 0 ] && [ ! -s "$TMP_DIR/brew-health-repaired.list" ]; then continue; fi
+    while IFS= read -r formula; do
+      [[ "$formula" =~ ^node(@[0-9]+)?$ ]] || continue
+      if ! prefix="$(run_timeout 20 brew --prefix "$formula" 2>/dev/null)"; then
+        [ "$pass" != "1" ] || NOTES[${#NOTES[@]}]="Homebrew の ${formula} の場所を取得できず起動確認は未検査"
         continue
       fi
+      bin="$prefix/bin/node"
+      if [ ! -x "$bin" ]; then
+        [ "$pass" != "1" ] || NOTES[${#NOTES[@]}]="Homebrew の ${formula} の実行ファイルがなく起動確認は未検査"
+        continue
+      fi
+      # 初回起動の遅さだけで修復しないよう、2 回続けて失敗したものだけを扱います。
+      node_keg_is_healthy "$bin" && continue
+      node_keg_is_healthy "$bin" && continue
+      if [ "$pass" != "3" ] && { [ "$RH_AUTOFIX_SOFTWARE" = "1" ] || [ "$RH_AUTOFIX_SECURITY" = "1" ]; }; then
+        if brew_repair_formula "$formula" node "$bin"; then repair_count=$((repair_count + 1)); fi
+      fi
+      if [ "$pass" = "3" ]; then
+        add_warning "Homebrew の ${formula} が起動しません（brew reinstall ${formula} を試してください）"
+      fi
+    done < "$formulas"
+    if [ "$pass" = "1" ]; then
+      check_updated_formula_linkage
     fi
-    add_warning "Homebrew の ${formula} が起動しません（brew reinstall ${formula} を試してください）"
-  done < "$formulas"
+  done
   refresh_brew_security_warning
 }
 
@@ -3192,6 +3677,50 @@ check_mac_security() {
   check_kit_update
 }
 
+desktop_notice() {
+  local message="$1" sound="${2-}"
+  [ "$RH_NO_DESKTOP" = 1 ] && return
+  if [ "$sound" = 1 ]; then
+    osascript -e "display notification \"$message\" with title \"repo-health\" sound name \"Basso\"" 2>/dev/null || true
+  else
+    osascript -e "display notification \"$message\" with title \"repo-health\"" 2>/dev/null || true
+  fi
+}
+
+check_unchecked_streaks() {
+  local item key days old_key saved_date _saved_count state_file today yesterday
+  local current="$TMP_DIR/unchecked-current" index="$STATE_DIR/unchecked-index"
+  today="${RH_TODAY:-$(TZ=Asia/Tokyo date '+%Y-%m-%d')}"
+  yesterday="$(python3 - "$today" <<'PY_DATE'
+from datetime import date, timedelta
+import sys
+print((date.fromisoformat(sys.argv[1]) - timedelta(days=1)).isoformat())
+PY_DATE
+)"
+  : > "$current"
+  for item in "${NOTES[@]+"${NOTES[@]}"}" "${DETAILS[@]+"${DETAILS[@]}"}"; do
+    case "$item" in *未検査*) ;; *) continue;; esac
+    key="unchecked-$(printf '%s' "$item" | cksum | awk '{print $1}')"
+    grep -Fqx -- "$key" "$current" && continue
+    printf '%s\n' "$key" >> "$current"
+    state_file="$(streak_file "$key")"
+    saved_date=""; _saved_count=0
+    [ ! -f "$state_file" ] || read -r saved_date _saved_count < "$state_file"
+    if [ "$saved_date" != "$today" ] && [ "$saved_date" != "$yesterday" ]; then streak_reset "$key"; fi
+    days="$(streak_bump "$key")"
+    if [ "$days" -ge 3 ]; then
+      add_warning "${item}（未検査が続いて${days}日目。設定や接続を確認してください）"
+    fi
+  done
+  if [ -f "$index" ]; then
+    while IFS= read -r old_key; do
+      grep -Fqx -- "$old_key" "$current" || streak_reset "$old_key"
+    done < "$index"
+  fi
+  cp "$current" "$index"
+  chmod 600 "$index" 2>/dev/null || true
+}
+
 send_resend() {
   local subject="$1" body="$2" api_key payload
   [ -n "$RH_MAIL_TO" ] || { printf 'mail: RH_MAIL_TO が未設定です\n' >&2; return 1; }
@@ -3200,7 +3729,7 @@ send_resend() {
     api_key="$(run_timeout 30 op read "$RH_RESEND_KEY_OP" 2>/dev/null)" || return 1
   else
     command -v security >/dev/null 2>&1 || { printf 'mail: macOS Keychain を利用できません\n' >&2; return 1; }
-    api_key="$(security find-generic-password -s repo-health-kit -a resend -w 2>/dev/null)" || return 1
+    api_key="$(run_timeout 30 security find-generic-password -s repo-health-kit -a resend -w 2>/dev/null)" || return 1
   fi
   [ -n "$api_key" ] || { printf 'mail: Resend API キーを取得できません\n' >&2; return 1; }
   payload="$TMP_DIR/resend-payload.json"
@@ -3288,6 +3817,8 @@ note_non_git_dir() {
   add_warning "$name — git 管理外のフォルダです。点検の対象になっていません（git init して remote を設定するか、別の場所へ移すか、RH_NONGIT_IGNORE に名前を加えてください）"
 }
 
+[ "$RH_SKIP_SECURITY" = "1" ] || check_node_kegs_health
+
 while IFS= read -r -d '' repo; do
   if [ ! -e "$repo/.git" ]; then
     note_non_git_dir "$repo"
@@ -3311,10 +3842,26 @@ fi
 
 [ "$RH_SECURITY_ONLY" = "1" ] || check_cli_tools
 check_mac_security
+check_unchecked_streaks
+
+completion_notice=""
+last_completed="$(cat "$STATE_DIR/last-completed" 2>/dev/null || true)"
+if is_uint "$last_completed"; then
+  elapsed=$(( $(date '+%s') - last_completed ))
+  if [ "$elapsed" -gt 129600 ]; then
+    completion_notice="前回の点検が $((elapsed / 3600)) 時間前で止まっていました"
+    add_warning "$completion_notice"
+  fi
+fi
+mail_failures="$(cat "$STATE_DIR/mail-failures" 2>/dev/null || true)"
+is_uint "$mail_failures" || mail_failures=0
 
 fail_count=${#FAILURES[@]}
 warn_count=${#WARNINGS[@]}
 generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
+report_draft="$TMP_DIR/report.md"
+mail_log="$TMP_DIR/mail-log"
+: > "$mail_log"
 
 {
   if [ "$RH_SECURITY_ONLY" = "1" ]; then
@@ -3322,6 +3869,7 @@ generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
   else
     printf '# リポジトリ・ヘルスチェック\n\n'
   fi
+  [ -z "$completion_notice" ] || printf '%s\n\n' "$completion_notice"
   printf '_生成: %s_\n\n' "$generated"
   printf '**要対応: FAIL %s件 / WARN %s件**\n\n' "$fail_count" "$warn_count"
   printf '## ① 要対応\n\n'
@@ -3348,22 +3896,16 @@ generated="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
   printf "\n## ④ 全文の場所\n\n- 最新: \`%s\`\n- 履歴: \`%s\`\n" "$REPORT" "$LOG_FILE"
   printf '\n---\n\n## 点検詳細\n\n'
   for item in "${DETAILS[@]+"${DETAILS[@]}"}"; do printf -- '- %s\n' "$item"; done
-} > "$REPORT" || fatal "レポートを書き込めません: $REPORT"
-chmod 600 "$REPORT" 2>/dev/null || true
+} > "$report_draft" || fatal "レポートを書き込めません: $REPORT"
+chmod 600 "$report_draft" 2>/dev/null || true
 
-{
-  printf '\n===== %s repo-health =====\n' "$generated"
-  sed -n '1,$p' "$REPORT"
-} >> "$LOG_FILE" || fatal "履歴ログへ追記できません: $LOG_FILE"
-chmod 600 "$LOG_FILE" 2>/dev/null || true
+sed -n '1,$p' "$report_draft"
 
-sed -n '1,$p' "$REPORT"
-
-if [ $((fail_count + warn_count)) -gt 0 ]; then
+if [ $((fail_count + warn_count + mail_failures)) -gt 0 ]; then
   if [ "$RH_NOMAIL" = "1" ]; then
-    printf 'mail: RH_NOMAIL=1 のため送信しない\n' >> "$LOG_FILE"
+    printf 'mail: RH_NOMAIL=1 のため送信しない\n' >> "$mail_log"
   elif [ "$RH_MAIL_METHOD" = "none" ]; then
-    printf 'mail: none のため送信しない\n' >> "$LOG_FILE"
+    printf 'mail: none のため送信しない\n' >> "$mail_log"
   else
     hostname_short="$(hostname -s 2>/dev/null || printf 'Mac')"
     hostname_short="$(clean_text "$hostname_short")"
@@ -3374,6 +3916,8 @@ if [ $((fail_count + warn_count)) -gt 0 ]; then
     fi
     mail_body="$TMP_DIR/mail-body.txt"
     {
+      [ "$mail_failures" -eq 0 ] || printf '前回まで %s 回送れませんでした\n\n' "$mail_failures"
+      [ -z "$completion_notice" ] || printf '%s\n\n' "$completion_notice"
       printf '■ 要対応\n'
       for item in "${FAILURES[@]+"${FAILURES[@]}"}"; do printf '  - FAIL  %s\n' "$item"; done
       for item in "${WARNINGS[@]+"${WARNINGS[@]}"}"; do printf '  - WARN  %s\n' "$item"; done
@@ -3387,15 +3931,31 @@ if [ $((fail_count + warn_count)) -gt 0 ]; then
       printf '\n■ 全文の場所\n  %s\n' "$REPORT"
     } > "$mail_body"
     if send_resend "$subject" "$(sed -n '1,$p' "$mail_body")"; then
-      printf 'mail: sent\n' >> "$LOG_FILE"
+      printf 'mail: sent\n' >> "$mail_log"
+      rm -f "$STATE_DIR/mail-failures"
     else
-      printf 'mail: FAILED（キー・宛先・ネットワークを確認してください）\n' >> "$LOG_FILE"
+      printf 'mail: FAILED（キー・宛先・ネットワークを確認してください）\n' >> "$mail_log"
+      printf '%s\n' "$((mail_failures + 1))" > "$STATE_DIR/mail-failures"
+      chmod 600 "$STATE_DIR/mail-failures" 2>/dev/null || true
+      desktop_notice '点検結果のメールを送れませんでした。設定と接続を確認してください'
     fi
   fi
 fi
 
-if [ "$fail_count" -gt 0 ] && [ "$RH_NO_DESKTOP" != "1" ]; then
-  osascript -e 'display notification "repo-health で FAIL。ローカルのレポートを確認してください" with title "repo-health" sound name "Basso"' 2>/dev/null || true
+if [ "$fail_count" -gt 0 ]; then
+  desktop_notice 'repo-health で FAIL。ローカルのレポートを確認してください' 1
+elif [ "$warn_count" -gt 0 ] && [ "$RH_MAIL_METHOD" = none ]; then
+  desktop_notice 'repo-health で WARN。ローカルのレポートを確認してください'
 fi
+# 通知まで済んだ結果だけを最新レポートと履歴に反映します。
+mv "$report_draft" "$REPORT" || fatal "レポートを書き込めません: $REPORT"
+{
+  printf '\n===== %s repo-health =====\n' "$generated"
+  sed -n '1,$p' "$REPORT"
+  cat "$mail_log"
+} >> "$LOG_FILE" || fatal "履歴ログへ追記できません: $LOG_FILE"
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+printf '%s\n' "$(date '+%s')" > "$STATE_DIR/last-completed"
+chmod 600 "$STATE_DIR/last-completed" 2>/dev/null || true
 [ "$fail_count" -eq 0 ] || exit 1
 exit 0

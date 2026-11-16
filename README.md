@@ -22,7 +22,7 @@ cd repo-health-kit
 
 ## メールを設定する
 
-Resend を使う方法を推奨します。設定しない場合も、ローカルのレポートと FAIL のデスクトップ通知は使えます。
+Resend を使う方法を推奨します。設定しない場合も、ローカルのレポートと FAIL・WARN のデスクトップ通知は使えます。
 
 1. [Resend](https://resend.com/) でアカウントを作ります。
 2. Resend の画面で API キーを作ります。キーは設定ファイルへ書かないでください。
@@ -48,6 +48,14 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
    ```
 
 1Password を使う場合は、API キーの代わりに `RH_RESEND_KEY_OP="op://…"` を設定できます。実行時に `op read` で取得し、キーをログや標準出力へ出しません。
+
+## 鍵と JavaScript の依存の点検
+
+鍵の検査は、追跡中のファイルと、未追跡かつ gitignore 外のファイルを見ます。未追跡で gitignore 済みのファイルは対象外です。追跡中の `.env.local`・`.env.production` など `.env*` は、追跡自体を FAIL にします（anon JWT だけのものは除きます）。`.env.example`・`.env.sample`・`.env.tpl` は、値が空・`op://`・`<...>`・`your-` で始まる見本だけなら除外します。検出結果にはファイル名・行番号・型だけを出し、値は出しません。見つかった鍵は入れ替え、Git の追跡から外してください。
+
+Supabase の service_role JWT（anon は対象外）、`sb_secret_`、Resend、AWS、GitHub、Google OAuth、パスワード入り PostgreSQL URL も見ます。侵害パッケージの照合は `package-lock.json` に加え、`npm-shrinkwrap.json`・`pnpm-lock.yaml`・`yarn.lock`（v1・berry）・`bun.lock` に対応します。読み取れない lock や照合の異常終了は FAIL、バイナリの `bun.lockb` は「未照合」の WARN です。
+
+依存の脆弱性は lock に合わせて npm・pnpm・yarn berry・bun の audit を使います。その道具がない場合は、入れる道具を参考に案内します。pnpm などの lock を npm audit で調べたことにはしません。
 
 ## Mac のセキュリティ点検（0.2.0〜）
 
@@ -114,10 +122,12 @@ Resend を使う方法を推奨します。設定しない場合も、ローカ�
 ### 何を自動で直すか
 
 - **証明書リスト（ca-certificates）** は、Homebrew に更新が出ていれば、初期設定で自動更新します。データだけの部品なので、既定で自動にしています。止める場合は `RH_AUTOFIX_CA_CERTS=0` にします。
-- **それ以外のセキュリティ部品**（node、python、openssl、curl、php など）は、`RH_AUTOFIX_SECURITY=1` のときだけ、まとめて `brew upgrade` します。Node や Python の版が上がると、開発中のアプリの動きが変わることがあるため、初期値は 0（自動更新しない）です。0 のままなら、更新待ちの部品は WARN 1件にまとめて届きます。
+- **それ以外のセキュリティ部品**（node、python、openssl、curl、php など）は、`RH_AUTOFIX_SECURITY=1` のとき `brew upgrade` します。Node や Python の版が上がると、開発中のアプリの動きが変わることがあるため、初期値は 0（自動更新しない）です。0 のままなら、更新待ちの部品は WARN 1件にまとめて届きます。
 - 最低版の点検（PHP・Node.js・Java・GitLab・macOS・アプリなど）、composer の依存、macOS のアップデートでは、自動では直しません（Homebrew の php と node は、`RH_AUTOFIX_SECURITY=1` のとき上の更新に含まれます）。WARN や FAIL の文に、直し方の手がかりを添えます。
-- 自動更新では、名指しした部品だけを更新します。その部品に依存する別の部品（たとえば Node や Python）を、Homebrew の既定の動きでまとめて更新することはしません。
+- 自動更新の前に依存関係を確認します。自動更新を止めているセキュリティ部品、`RH_SOFTWARE_IGNORE` に書いたもの、pin 中の部品を依存先として一緒に上げる候補は、更新せず WARN で知らせます。依存元の自動更新も抑えます。Homebrew がほかの部品を更新した場合は、前後の導入済み版を比べて「（巻き込みで更新）」と記録します。
 - **入っているソフト**は、`RH_AUTOFIX_SOFTWARE=1` のときだけ、Homebrew の formula と、画面のあるアプリを持たない cask（フォントなど）を `brew upgrade` します。初期値は 0（自動更新しない）です。画面のあるアプリ、管理者のパスワードが要る pkg 形式のもの（zoom・Google Drive など）、App Store、npm の道具は、自動では更新しません。更新のあとに Homebrew の node（`node`・`node@24` など）が起動しなくなったときは、その formula を `brew upgrade`、だめなら `brew reinstall` で1回だけ直し、それでも起動しなければ WARN でお知らせします。
+- **同じ版の作り直し**（例: `26.13.1_1` → `26.13.1_2`）は、`RH_AUTOFIX_SOFTWARE=1` ならセキュリティ部品にも当て、「（同じ版の作り直し）」と記録します。`RH_AUTOFIX_SECURITY` の初期値は 0 のままです。pin 中の部品は更新待ちの WARN から外し、「pin 中」と参考に残します。
+- 更新した formula と、それを使う導入済みの formula は、部品の参照が壊れていないかも確認します。起動確認で2回続けて失敗した Node.js や、参照が壊れた formula は、自動更新が有効なら upgrade → reinstall を1回試します。修復後はすべての Homebrew の Node.js をもう一度確認します。点検には1部品60秒・合計600秒の上限があり、確認できなかったものは「未検査」に残します。
 - 自動で更新したものは、レポートの「自動で直したもの」に載ります。自動更新に失敗したときは WARN でお知らせします。
 
 ### 外部へ接続するところ
@@ -138,7 +148,11 @@ Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=
 
 ## 届いたメールの読み方
 
-メールは、FAIL か WARN があるときに届きます。
+メールは、FAIL か WARN があるときに届きます。送れなかった回は目印を保存し、画面にも通知します。次に送れるメールの先頭には「前回まで N 回送れませんでした」と出ます。宛先・鍵の取得方法・ネットワークを確認してください。
+
+同じ種類の未検査が3日続くと、何日目かを添えて WARN に上げます。前回の完了から36時間より長く空いた場合も、今回の先頭で知らせます。点検全体は `RH_MAX_RUNTIME`（初期値2400秒）で打ち切り、同時起動は先に始まった1本だけが進みます。残った実行中の目印は3時間で無効になります。止まっていた間の通知は、次に点検が動いたときに届きます。
+
+`RH_MAIL_METHOD=none` では WARN も音なしの画面通知に出ます。`RH_NO_DESKTOP=1` なら画面通知を止められます。
 
 - `FAIL（赤）` は今日中に確認する目安です。例: detached HEAD、作業途中の merge、平文シークレット、本番依存の critical/high（npm・composer）、侵害パッケージ、侵害された GitHub Actions、サーバーとして動いている古い PHP・GitLab・Plex Media Server です。
 - `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
@@ -177,6 +191,8 @@ RH_AUTOFIX_CLI=0
 
 CLI の自動更新は初期状態で無効です。有効にしたときも、npm で入れた CLI は公開から3日以上たった版までしか上げません（0.5.0〜）。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
 
+他人から受け取ったフォルダは点検ルートに置かないでください。点検時の git はファイル監視・hook・リポ固有の SSH コマンドを無効にし、composer もプラグインとスクリプトを動かさずに使います。
+
 点検ルート直下にある git 管理外のフォルダは、点検できないので WARN で知らせます（`RH_WARN_NONGIT=1`、初期値）。空のフォルダと `.` で始まるフォルダは参考扱いです。
 素材置き場など git 管理外でよいフォルダは `RH_NONGIT_IGNORE` に名前を書くと、WARN ではなく参考に出ます。
 
@@ -205,7 +221,7 @@ RH_SOFTWARE_IGNORE=()     # 更新確認から外すもの。例: ("rclone" "Mic
 
 `RH_SECURITY_ONLY=1` は、リポジトリの同期や依存の監査を別の仕組みで見ている場合に使います。このとき、リポジトリの fetch・未コミット・同期待ち・npm/composer audit・CLI の更新確認は行いません。レポートの見出しは「Mac のセキュリティ点検」、メールの件名は `[mac-security]` になります。
 
-本番依存の critical/high を調査のうえ期限付きで据え置く場合は、`~/.config/repo-health-kit/vuln-allow.tsv` に次の形式で追記します。npm と composer の両方に効きます。初期状態は空です。
+本番依存の critical/high を調査のうえ期限付きで据え置く場合は、`~/.config/repo-health-kit/vuln-allow.tsv` に次の形式で追記します。npm と composer の両方に効きます。初期状態は空です。2列目には GHSA の ID またはパッケージ名を書き、複数なら `,` で区切ります。一致した指摘だけを据え置き、ほかの critical/high は FAIL のまま知らせます。文面には「据え置き N 件・据え置き外 M 件」と出ます。2列目が説明文の古い行は従来どおり効きますが、移行の注記が出るため、ID・パッケージ名に書き換えてください。
 
 ```text
 repo名<TAB>advisoryまたはpackage<TAB>YYYY-MM-DD<TAB>理由
