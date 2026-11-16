@@ -24,7 +24,9 @@ SKIP = {'.git', 'node_modules', 'vendor', '.next', '.venv', 'venv', '__pycache__
 IDENT = r'(?:"(?:[^"]|"")+"|[a-zA-Z_][\w$]*)'
 NAME = rf'{IDENT}(?:\s*\.\s*{IDENT})?'
 REF_URL = re.compile(r'https://([a-z0-9]{20})\.supabase\.co\b')
-SECRET_NAME = re.compile(r'NEXT_PUBLIC_[A-Z0-9_]*(?:SERVICE|SECRET|PRIVATE|ROLE|PASSWORD|TOKEN)[A-Z0-9_]*')
+SECRET_WORDS = r'SECRET|SERVICE_ROLE|PASSWORD|PRIVATE_KEY|ACCESS_TOKEN|REFRESH_TOKEN'
+SECRET_NAME = re.compile(r'NEXT_PUBLIC_(?:[A-Z0-9]+_)*(?:' + SECRET_WORDS + r')(?:_[A-Z0-9]+)*')
+JS_TOKEN = re.compile(r'''//[^\n]*|/\*[\s\S]*?\*/|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"''')
 AUTH = re.compile(r'\b(?:getUser|getSession|auth|authenticate|authorize|verifyToken|requireUser|requireAuth)\s*[.(]', re.I)
 TENANT = re.compile(r'\b(?:org_id|tenant_id|team_id|company_id|workspace_id)\b', re.I)
 
@@ -91,6 +93,128 @@ def has_secret(text: str) -> bool:
         except (ValueError, UnicodeError):
             pass
     return False
+
+
+def js_mask(text: str, *, strings=True) -> str:
+    """照合位置と行番号を保ったままコメント・文字列を隠します。"""
+    result = list(text)
+
+    def hide(start, end):
+        result[start:end] = ['\n' if c == '\n' else ' ' for c in text[start:end]]
+
+    def code(pos, interpolation=False):
+        depth = 0
+        while pos < len(text):
+            m = JS_TOKEN.match(text, pos)
+            if m:
+                if strings or m[0].startswith(('//', '/*')):
+                    hide(pos, m.end())
+                pos = m.end()
+                continue
+            if text[pos] == '`':
+                start = pos
+                pos += 1
+                while pos < len(text):
+                    if text[pos] == '\\':
+                        pos += 2
+                    elif text[pos] == '`':
+                        pos += 1
+                        break
+                    elif text.startswith('${', pos):
+                        if strings:
+                            hide(start, pos + 2)
+                        pos = code(pos + 2, True)
+                        start = pos
+                    else:
+                        pos += 1
+                if strings:
+                    hide(start, min(pos, len(text)))
+                continue
+            if interpolation:
+                if text[pos] == '{':
+                    depth += 1
+                elif text[pos] == '}':
+                    if depth == 0:
+                        return pos + 1
+                    depth -= 1
+            pos += 1
+        return pos
+
+    code(0)
+    return ''.join(result)
+
+
+def client_source(text: str) -> bool:
+    m = re.match(r'''\s*(['"])use client\1([^\S\n]*)(;|\n|$)''', js_mask(text, strings=False))
+    if not m:
+        return False
+    # 改行の後に式が続く場合は、指示文ではありません。
+    tail = js_mask(text, strings=False)[m.end():].lstrip()
+    return m[3] != '\n' or not tail.startswith(tuple('([`.+-*/%<>=!&|^?,:'))
+
+
+def secret_reference(text: str) -> bool:
+    return any(re.search(SECRET_WORDS, m[1]) for m in re.finditer(
+        r'\bprocess\s*\.\s*env\s*\.\s*([A-Za-z_$][\w$]*)', js_mask(text)))
+
+
+def imports(text: str):
+    code = js_mask(text)
+    for m in re.finditer(r'''\b(?:import|export)\s+(?:[^;]*?\bfrom\s*)?['"]([^'"\n]+)['"]''', js_mask(text, strings=False)):
+        if code[m.start():m.start() + 6] in ('import', 'export'):
+            yield m[1]
+
+
+def server_only(text: str) -> bool:
+    code = js_mask(text)
+    return any(code[m.start():m.start() + 6] == 'import' for m in re.finditer(
+        r'''\bimport\s*['"]server-only['"]''', js_mask(text, strings=False)))
+
+
+def browser_path(path: Path, repo: Repo) -> bool:
+    parts = path.relative_to(repo.path).parts
+    return parts[0] in {'app', 'components', 'lib', 'src', 'hooks'} and not any(
+        'scripts' in part.lower() for part in parts[:-1])
+
+
+def select_clones(paths: list[Path], guard: Guard) -> list[Path]:
+    groups = defaultdict(list)
+    selected = []
+    for path in sorted(set(paths)):
+        if not (path / '.git').exists():
+            continue
+        try:
+            origin = git(path, 'remote', 'get-url', 'origin').strip()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            origin = ''
+        if origin:
+            groups[origin].append(path)
+        else:
+            selected.append(path)
+    for group in groups.values():
+        if len(group) == 1:
+            selected.extend(group)
+            continue
+        branches, defaults, dates = {}, [], {}
+        for path in group:
+            branches[path] = 'detached HEAD'
+            try:
+                branches[path] = git(path, 'symbolic-ref', '--quiet', '--short', 'HEAD').strip() or 'detached HEAD'
+                default = git(path, 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD').strip()
+                if default == 'refs/remotes/origin/' + branches[path]:
+                    defaults.append(path)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            try:
+                dates[path] = int(git(path, 'log', '-1', '--format=%ct').strip())
+            except (OSError, ValueError, subprocess.SubprocessError):
+                dates[path] = 0
+        keep = defaults or [max(group, key=lambda p: dates[p])]
+        selected.extend(keep)
+        for path in group:
+            if path not in keep:
+                guard.emit('NOTE', 'clone_skipped', path.name, '-', f'同じリモートの別の clone（{branches[path]}）は省略')
+    return sorted(selected)
 
 
 @dataclass
@@ -396,20 +520,44 @@ def function_identity(base: str, arguments: str):
     return base, digest(','.join(types))
 
 
+def table_body_hash(sql: str, start: int) -> str:
+    # 引用された値や識別子は保ち、空白・コメント・非引用語の大文字小文字だけを正規化します。
+    tokens = re.finditer(r'''\s+|'(?:''|[^'])*'|"(?:""|[^"])*"|\$([A-Za-z_0-9]*)\$[\s\S]*?\$\1\$|[\w$]+|[^\s]''', sql[start:])
+    body, depth = [], 0
+    for m in tokens:
+        token = m[0]
+        if token.isspace():
+            continue
+        if token == '(':
+            depth += 1
+            if depth == 1:
+                continue
+        elif token == ')':
+            depth -= 1
+            if depth == 0:
+                return hashlib.md5(json.dumps(body).encode()).hexdigest()
+        if depth:
+            body.append(token if token.startswith(('"', "'", '$')) else token.lower())
+    # CREATE TABLE AS / LIKE など列本文が無い形も、同一と決めつけず比較します。
+    return hashlib.md5(re.sub(r'\s+', ' ', sql[start:].strip()).encode()).hexdigest()
+
+
 def static_group(repos: list[Repo], guard: Guard, shared: bool):
     tables, policies, views, functions = {}, {}, {}, {}
-    created = defaultdict(set)
-    dynamic = False
+    created = defaultdict(lambda: defaultdict(set))
+    dynamic_blocks, dynamic_exec = [], []
     sources = sorted((src for repo in repos for src in repo.sql), key=lambda s: (Path(s.path).name, s.path, str(s.repo.path), s.line))
     for src in sources:
         sql = src.definition
         low = sql.lower()
-        if re.match(r'\s*do\b', low) and re.search(r'\bexecute\b[\s\S]*enable\s+row\s+level\s+security', low):
-            dynamic = True
+        if re.match(r'\s*do\b', low) and re.search(r'\bexecute\b', low):
+            dynamic_exec.append(low)
+            if re.search(r'enable\s+row\s+level\s+security', low):
+                dynamic_blocks.append(low)
         m = re.match(rf'create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?({NAME})', sql, re.I)
         if m:
             target = table_name(m[1])
-            created[target].add(str(src.repo.path))
+            created[target][str(src.repo.path)].add(table_body_hash(sql, m.end()))
             if target not in tables or not re.search(r'if\s+not\s+exists', sql, re.I):
                 tables[target] = {'source': src, 'rls': False, 'columns': set(TENANT.findall(sql)), 'grant': False}
         m = re.match(rf'alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({NAME})\s+(.*)', sql, re.I | re.S)
@@ -507,12 +655,19 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
     for target, t in tables.items():
         src = t['source']
         if target.startswith('public.') and not t['rls']:
+            # 動的 SQL で有効化している「可能性」は、その表の名前を含むか、表の一覧を回す形のときだけ認める
+            bare = re.escape(target.split('.')[-1])
+            dynamic = any(re.search(r'\b' + bare + r'\b', block) or (re.search(r'\bfor\b[\s\S]*?\bin\b[\s\S]*?\bfrom\s+(?:pg_catalog\.)?(?:pg_tables|pg_class)\b|\bfor\b[\s\S]*?\bin\b[\s\S]*?information_schema\.tables', block) and re.search(r'format\s*\(|%i|quote_ident|\|\|', block)) for block in dynamic_blocks)
             guard.finding('NOTE' if dynamic else 'WARN', 'rls_off', src.repo, target,
                           'migration の記述上は RLS 有効化が見つかりません（本番は未確認）' + ('・動的 SQL で有効化している可能性' if dynamic else '') + ('・公開ロールへの GRANT もあります' if t['grant'] else ''), source=src)
         guard.owner(src.repo, target, source=src)
     for (target, pn), p in policies.items():
         src = p['source']
+        bare_table = re.escape(target.split('.')[-1])
+        redone = any(re.search(r'\b' + bare_table + r'\b', block) and re.search(r'(?:drop|alter|create)\s+policy', block) for block in dynamic_exec)
         for level, kind, message in policy_risks(p, shared):
+            if redone:
+                level, message = 'NOTE', message + '・後の動的 SQL で方針を作り直している可能性'
             guard.finding(level, kind, src.repo, f'{target}:{pn}', 'migration の記述上は' + message + '（本番は未確認）', source=src, definition_hash=digest(p['sql']))
         t = tables.get(target)
         using = p['using'] or ''
@@ -529,9 +684,12 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
                 guard.finding('WARN', 'definer_path', src.repo, target, 'migration の記述上は DEFINER の search_path が未固定です（本番は未確認）', source=src)
             if not {'public', 'anon'} <= f['revoked']:
                 guard.finding('WARN', 'definer_execute', src.repo, target, 'migration の記述上は DEFINER の public・anon の EXECUTE 撤回が見つかりません（本番は未確認）', source=src)
-    for target, labels in created.items():
-        if len(labels) > 1:
-            guard.finding('WARN', 'table_collision', ', '.join(Path(p).name for p in sorted(labels)), target, '同じプロジェクトで複数リポが同じ表名を作っています')
+    for target, definitions in created.items():
+        if len(definitions) > 1:
+            different = len({frozenset(hashes) for hashes in definitions.values()}) > 1
+            guard.finding('WARN' if different else 'INFO', 'table_collision',
+                          ', '.join(Path(p).name for p in sorted(definitions)), target,
+                          '同じプロジェクトで複数リポの列定義が異なります' if different else '同じ定義を複数リポが持っています')
     return tables
 
 
@@ -627,16 +785,18 @@ def source_scan(repo: Repo, guard: Guard):
                         guard.finding('FAIL', 'browser_env', repo, f'{repo.label}:{rel}', f'公開用の変数名に秘密を示す語があります [{rel}:{lineno}]', protected=bool(re.search(r'SERVICE|SECRET|ROLE', m[1])))
     for path, text in texts.items():
         rel = path.relative_to(repo.path).as_posix()
-        for m in re.finditer(r'process\.env\.(' + SECRET_NAME.pattern + ')', text):
-            guard.finding('FAIL', 'browser_env', repo, f'{repo.label}:{rel}', f'公開用の変数名に秘密を示す語があります [{rel}:{text.count(chr(10), 0, m.start()) + 1}]', protected=bool(re.search(r'SERVICE|SECRET|ROLE', m[1])))
+        for m in re.finditer(r'\bprocess\s*\.\s*env\s*\.\s*([A-Z][A-Z0-9_]*)\b', js_mask(text)):
+            if SECRET_NAME.fullmatch(m[1]):
+                guard.finding('FAIL', 'browser_env', repo, f'{repo.label}:{rel}', f'公開用の変数名に秘密を示す語があります [{rel}:{text.count(chr(10), 0, m.start()) + 1}]', protected=bool(re.search(r'SERVICE|SECRET|ROLE', m[1])))
         if path.name.startswith('next.config'):
             block = re.search(r'\benv\s*:\s*\{([\s\S]*?)\}', text)
-            if block and re.search(r'\b\w*(?:SERVICE|SECRET|PRIVATE|ROLE|PASSWORD|TOKEN)\w*\s*:', block[1]):
+            if block and any(re.search(r'(?:^|_)(?:' + SECRET_WORDS + r')(?:_|$)', key)
+                             for key in re.findall(r'\b([A-Z][A-Z0-9_]*)\s*:', block[1])):
                 guard.finding('FAIL', 'browser_env', repo, f'{repo.label}:{rel}', 'next.config の env に秘密を示す変数名があります', protected=bool(re.search(r'SERVICE|SECRET|ROLE', block[1])))
-        if not re.search(r'''["']use client["']''', text) or re.search(r'''import\s*["']server-only["']''', text):
+        if not browser_path(path, repo) or not client_source(text):
             continue
-        danger = bool(re.search(r'SERVICE_ROLE|SUPABASE_SECRET_KEY|sb_secret_', text))
-        for imported in re.findall(r'''(?:import|export)\b[^;]*?from\s*["']([^"']+)["']''', text):
+        danger = secret_reference(text) or has_secret(js_mask(text, strings=False))
+        for imported in imports(text):
             if imported.startswith('.'):
                 base = path.parent / imported
             elif imported.startswith('@/'):
@@ -645,14 +805,17 @@ def source_scan(repo: Repo, guard: Guard):
                     base = repo.path / 'src' / imported[2:]
             else:
                 continue
-            for candidate in [base, Path(str(base) + '.ts'), Path(str(base) + '.tsx'), base.with_suffix('.ts'), base.with_suffix('.tsx'), base / 'index.ts', base / 'index.tsx']:
+            candidates = [base]
+            for suffix in ('.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'):
+                candidates.extend((Path(str(base) + suffix), base.with_suffix(suffix), base / ('index' + suffix)))
+            for candidate in candidates:
                 # リポ外の import と symlink は読みません。
                 if candidate.is_symlink() or not candidate.resolve().is_relative_to(repo.path):
                     continue
                 resolved = candidate.resolve()
-                if resolved in texts:
+                if resolved in texts and browser_path(resolved, repo):
                     imported_text = texts[resolved]
-                    if not re.search(r'''import\s*["']server-only["']''', imported_text) and re.search(r'SERVICE_ROLE|SUPABASE_SECRET_KEY|sb_secret_', imported_text):
+                    if not server_only(imported_text) and secret_reference(imported_text):
                         danger = True
         if danger:
             guard.finding('FAIL', 'browser_service_key', repo, f'{repo.label}:{rel}', 'ブラウザ側から service_role・秘密の参照があります', protected=True)
@@ -1091,9 +1254,7 @@ def main():
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
     repos = []
-    for path in sorted(set(paths)):
-        if not (path / '.git').exists():
-            continue
+    for path in select_clones(paths, guard):
         repo = Repo(path)
         repos.append(repo)
         try:

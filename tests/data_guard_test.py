@@ -32,11 +32,20 @@ with (root / 'cli-log').open('a') as h:
     h.write(json.dumps([cmd, args, time.monotonic()]) + '\n')
 if cmd == 'git':
     repo = pathlib.Path(args[args.index('-C')+1])
-    if 'for-each-ref' in args or 'rev-parse' in args: print('a'*40)
+    if 'symbolic-ref' in args:
+        p = repo / ('.fixture-default' if args[-1] == 'refs/remotes/origin/HEAD' else '.fixture-branch')
+        if not p.exists(): sys.exit(1)
+        print(p.read_text().strip())
+    elif 'for-each-ref' in args or 'rev-parse' in args: print('a'*40)
+    elif 'log' in args and '--format=%ct' in args:
+        p = repo / '.fixture-date'
+        print(p.read_text().strip() if p.exists() else '0')
     elif 'log' in args:
         p = repo / '.fixture-history'
         if p.exists(): sys.stdout.write(p.read_text())
-    elif 'remote' in args: print('https://github.com/example/' + repo.name + '.git')
+    elif 'remote' in args:
+        p = repo / '.fixture-origin'
+        print(p.read_text().strip() if p.exists() else 'https://github.com/example/' + repo.name + '.git')
 elif cmd == 'gh':
     if 'status' in args:
         sys.exit(int(os.environ.get('DG_GH_AUTH_RC', '0')))
@@ -301,8 +310,87 @@ class GuardTest(unittest.TestCase):
         self.write('supabase/.temp/project-ref', REF)
         other = self.new_repo('app-b', REF)
         self.sql('create table if not exists app_a_profiles(id uuid);')
-        self.sql('create table if not exists app_a_profiles(id uuid);', repo=other)
+        self.sql('create table if not exists app_a_profiles(id uuid, label text);', repo=other)
         self.assert_hit(self.scan(), 'WARN', 'table_collision')
+
+    def test_table_collision_same_definition(self):
+        self.write('supabase/.temp/project-ref', REF)
+        other = self.new_repo('app-b', REF)
+        self.sql("create table app_a_profiles(id uuid, label text default 'A (demo)', amount numeric(8, 2));")
+        self.sql("CREATE TABLE IF NOT EXISTS public.app_a_profiles ( ID UUID, /* copy */ LABEL TEXT DEFAULT 'A (demo)', AMOUNT NUMERIC (8,2) );", repo=other)
+        out = self.scan()
+        self.assert_hit(out, 'INFO', 'table_collision')
+        self.assertNotIn('DG\tWARN\ttable_collision\t', out)
+        self.assertIn('同じ定義を複数リポが持っています', out)
+
+    def test_table_collision_preserves_quoted_values(self):
+        self.write('supabase/.temp/project-ref', REF)
+        other = self.new_repo('app-b', REF)
+        self.sql("create table app_a_profiles(label text default 'A  B');")
+        self.sql("create table app_a_profiles(label text default 'a b');", repo=other)
+        self.assert_hit(self.scan(), 'WARN', 'table_collision')
+
+    def test_table_collision_different_refs(self):
+        self.write('supabase/.temp/project-ref', REF)
+        other = self.new_repo('app-b', 'bbbbbbbbbbbbbbbbbbbb')
+        self.sql('create table app_a_profiles(id uuid);')
+        self.sql('create table app_a_profiles(id text);', repo=other)
+        self.assert_no_hit(self.scan(), 'table_collision')
+
+    def clone_fixture(self, branch_a='main', branch_b='topic', date_a=100, date_b=200):
+        other = self.new_repo('app-b', REF)
+        for repo, branch, stamp in ((self.repo, branch_a, date_a), (other, branch_b, date_b)):
+            self.write('.fixture-origin', 'https://example.invalid/fixture/app.git', repo)
+            self.write('.fixture-default', 'refs/remotes/origin/main', repo)
+            self.write('.fixture-branch', branch, repo)
+            self.write('.fixture-date', str(stamp), repo)
+            self.write('supabase/.temp/project-ref', REF, repo)
+        return other
+
+    def test_clone_default_excludes_old_findings(self):
+        other = self.clone_fixture()
+        self.sql(self.open_sql(role='authenticated'))
+        self.sql('create table app_b_legacy(id uuid);', repo=other)
+        self.write('app/page.tsx', "'use client'; const key=process.env.APP_SECRET;", other)
+        self.write('.fixture-history', '.env.local\0', other)
+        out = self.scan(RH_DATA_GITHUB='1')
+        self.assert_hit(out, 'NOTE', 'clone_skipped')
+        self.assertIn('同じリモートの別の clone（topic）は省略', out)
+        self.assert_hit(out, 'WARN', 'policy_authenticated')
+        for kind in ('shared_project', 'rls_off', 'browser_service_key', 'history_key_file'):
+            self.assert_no_hit(out, kind)
+        self.assertIn('DG_DONE\t1\t', out)
+        logs = [json.loads(line) for line in (self.root / 'cli-log').read_text().splitlines()]
+        self.assertFalse(any('repos/example/app-b' in arg for entry in logs if entry[0] == 'gh' for arg in entry[1]))
+
+    def test_clone_default_keeps_findings(self):
+        self.clone_fixture(branch_a='topic', branch_b='main')
+        self.sql('create table app_a_legacy(id uuid);')
+        self.sql('create table app_b_profiles(id uuid);', repo=self.root / 'repos/app-b')
+        out = self.scan()
+        self.assert_hit(out, 'WARN', 'rls_off')
+        self.assertNotIn('public.app_a_legacy', out)
+        self.assertIn('public.app_b_profiles', out)
+
+    def test_clone_fallback_latest_commit(self):
+        other = self.clone_fixture('topic-a', 'topic-b')
+        self.sql('create table app_a_legacy(id uuid);')
+        self.sql('create table app_b_profiles(id uuid);', repo=other)
+        out = self.scan()
+        self.assertIn('public.app_b_profiles', out)
+        self.assertNotIn('public.app_a_legacy', out)
+        self.assertIn('DG_DONE\t1\t', out)
+
+    def test_clone_fallback_latest_can_be_first(self):
+        self.clone_fixture('topic-a', 'topic-b', 300, 200)
+        self.sql('create table app_a_profiles(id uuid);')
+        self.assertIn('public.app_a_profiles', self.scan())
+
+    def test_distinct_origins_are_both_scanned(self):
+        self.new_repo('app-b')
+        out = self.scan()
+        self.assert_no_hit(out, 'clone_skipped')
+        self.assertIn('DG_DONE\t2\t', out)
 
     def test_env_only_ref(self):
         self.write('.env.local', f'NEXT_PUBLIC_SUPABASE_URL=https://{REF}.supabase.co\nOTHER_SECRET={FAKE_PASSWORD}\n')
@@ -324,6 +412,103 @@ class GuardTest(unittest.TestCase):
         self.write('app/page.tsx', "'use client';\nimport { db } from '../lib/db';")
         self.write('lib/db.ts', "import 'server-only';\nconst db = process.env.SUPABASE_SERVICE_ROLE_KEY;")
         self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_client_directive_leading_comments(self):
+        for directive in ("'use client';", '"use client"\n'):
+            with self.subTest(directive=directive):
+                self.write('src/app/page.tsx', '\n// heading\n/* heading */\n' + directive + '\nconst key=process.env.APP_SECRET;')
+                self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_client_directive_must_be_first_statement(self):
+        for prefix in ("const a=1; // 'use client'\n", '/* "use client" */\n',
+                       "'use server';\n'use client';\n", "const hint = \"'use client'\";\n",
+                       "'use client' + 'example';\n", "'use client'\n+ 'example';\n"):
+            with self.subTest(prefix=prefix):
+                self.write('lib/server.ts', prefix + 'const key=process.env.APP_SERVICE_ROLE_KEY;')
+                self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_words_comments_and_strings_are_ignored(self):
+        self.write('app/page.tsx', """'use client';
+// process.env.APP_SECRET and service_role
+/* process.env.APP_PRIVATE_KEY */
+const quiz = 'SERVICE_ROLE_KEY service_role process.env.APP_PASSWORD';
+const lesson = `process.env.APP_REFRESH_TOKEN`;
+""")
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_private_env_references(self):
+        for word in ('SERVICE_ROLE', 'SECRET', 'PRIVATE_KEY', 'PASSWORD', 'ACCESS_TOKEN', 'REFRESH_TOKEN'):
+            with self.subTest(word=word):
+                self.write('hooks/use-demo.ts', "'use client'; const key=process.env.APP_" + word + ';')
+                self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_browser_template_expression_is_code(self):
+        self.write('app/page.tsx', "'use client'; const value=`Bearer ${process.env.APP_SECRET}`;")
+        self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_browser_nested_template_expression_is_code(self):
+        self.write('app/page.tsx', "'use client'; const value=`${{key: `nested ${process.env.APP_PASSWORD}`}.key}`;")
+        self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_browser_import_javascript_index(self):
+        self.write('app/page.tsx', "'use client'; import { key } from '../lib/keys';")
+        self.write('lib/keys/index.js', 'export const key=process.env.APP_ACCESS_TOKEN;')
+        self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_browser_actual_key_shapes(self):
+        for key in ('sb_secret_fixturekey', jwt('service_role')):
+            with self.subTest(key_kind=key[:3]):
+                self.write('components/demo.tsx', "'use client'; const key='" + key + "';")
+                out = self.scan()
+                self.assert_hit(out, 'FAIL', 'browser_service_key')
+                self.assertNotIn(key, out)
+
+    def test_browser_public_values_and_comments_are_ignored(self):
+        self.write('app/page.tsx', "'use client';\n// sb_secret_fixturekey\nconst key='" + jwt('anon') + "'; const url=process.env.NEXT_PUBLIC_APP_URL;")
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_source_scope(self):
+        for rel in ('scripts/lesson.ts', 'training/page.tsx', 'next.config.ts',
+                    'app/scripts/page.tsx', 'src/demo-scripts/page.tsx', 'lib/scripts-demo/key.ts'):
+            self.write(rel, "'use client'; const key=process.env.APP_SECRET; const sample='sb_secret_fixturekey';")
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_import_scope(self):
+        self.write('app/page.tsx', "'use client'; import { key } from '../scripts/demo';")
+        self.write('scripts/demo.ts', 'export const key=process.env.APP_SECRET;')
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_import_words_and_server_marker_comments(self):
+        self.write('app/page.tsx', "'use client'; import { key } from '@/lib/key';")
+        self.write('src/lib/key.ts', "// import 'server-only';\nexport const key=process.env.APP_PRIVATE_KEY;")
+        self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+        self.write('src/lib/key.ts', "// process.env.APP_PRIVATE_KEY\nexport const quiz='SERVICE_ROLE_KEY';")
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_import_only_one_hop(self):
+        self.write('app/page.tsx', "'use client'; import { key } from '../lib/first';")
+        self.write('lib/first.ts', "export { key } from './second';")
+        self.write('lib/second.ts', 'export const key=process.env.APP_SECRET;')
+        self.assert_no_hit(self.scan(), 'browser_service_key')
+
+    def test_browser_env_token_boundaries(self):
+        for key in ('NEXT_PUBLIC_FF_PUBLIC_PRIVATE_SPLIT', 'NEXT_PUBLIC_SERVICE_URL',
+                    'NEXT_PUBLIC_ROLE', 'NEXT_PUBLIC_TOKEN', 'NEXT_PUBLIC_MYSECRET',
+                    'NEXT_PUBLIC_PRIVATE_LABEL_KEY', 'NEXT_PUBLIC_ACCESS_TOKENIZED'):
+            self.write('.env.local', key + '=fixture')
+            self.write('lib/public.ts', 'const value=process.env.' + key + ';')
+            self.write('next.config.ts', 'export default {env: {' + key + ': "fixture"}};')
+            with self.subTest(key=key):
+                self.assert_no_hit(self.scan(), 'browser_env')
+
+    def test_browser_env_secret_tokens(self):
+        for word in ('SECRET', 'SERVICE_ROLE', 'PASSWORD', 'PRIVATE_KEY', 'ACCESS_TOKEN', 'REFRESH_TOKEN'):
+            key = 'NEXT_PUBLIC_APP_' + word + '_VALUE'
+            with self.subTest(word=word):
+                self.write('.env.local', key + '=fixture')
+                self.write('lib/public.ts', 'const value=process.env.' + key + ';')
+                self.write('next.config.ts', 'export default {env: {APP_' + word + ': "fixture"}};')
+                self.assertEqual(self.scan().count('DG\tFAIL\tbrowser_env\t'), 3)
 
     def test_static_bundle_jwt(self):
         self.write('.next/static/app.js', 'const a="' + jwt('service_role') + '";')
