@@ -347,6 +347,16 @@ class GuardTest(unittest.TestCase):
             self.write('supabase/.temp/project-ref', REF, repo)
         return other
 
+    def test_done_counts_git_repos_from_repos_file(self):
+        # 本体は点検ルートの全フォルダを渡し、git のリポの数と DG_DONE を照らし合わせる。git でないフォルダは数えない
+        plain = self.root / 'repos' / 'not-a-repo'
+        plain.mkdir(parents=True, exist_ok=True)
+        listing = self.root / 'repos.list'
+        listing.write_bytes(b'\0'.join(os.fsencode(str(x)) for x in (self.repo, plain)) + b'\0')
+        proc = subprocess.run([sys.executable, '-I', str(SCANNER), '--repos-file', str(listing)], env=self.env, text=True, capture_output=True, timeout=35)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertRegex(proc.stdout, r'DG_DONE\t1\t\d+\n$')
+
     def test_clone_default_excludes_old_findings(self):
         other = self.clone_fixture()
         self.sql(self.open_sql(role='authenticated'))
