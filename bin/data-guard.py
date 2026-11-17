@@ -1369,7 +1369,8 @@ def main():
         site_scan(site, index, guard)
     if not sites:
         guard.emit('NOTE', 'site_disabled', '-', '-', '本番サイトは URL 未設定のため未検査です')
-    print(f'DG_DONE\t{len(repos)}\t{guard.statements}', flush=True)
+    # 本体は「渡したリポの数」と照らし合わせて最後まで動いたかを見るので、省いた別の clone も含めた数を返す
+    print(f'DG_DONE\t{len(paths)}\t{guard.statements}', flush=True)
     return 0
 
 

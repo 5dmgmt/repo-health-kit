@@ -359,7 +359,8 @@ class GuardTest(unittest.TestCase):
         self.assert_hit(out, 'WARN', 'policy_authenticated')
         for kind in ('shared_project', 'rls_off', 'browser_service_key', 'history_key_file'):
             self.assert_no_hit(out, kind)
-        self.assertIn('DG_DONE\t1\t', out)
+        # 本体は渡したリポの数と照らし合わせるので、省いた clone も数に入れる（2 本渡して 1 本を省いても 2）
+        self.assertIn('DG_DONE\t2\t', out)
         logs = [json.loads(line) for line in (self.root / 'cli-log').read_text().splitlines()]
         self.assertFalse(any('repos/example/app-b' in arg for entry in logs if entry[0] == 'gh' for arg in entry[1]))
 
@@ -379,7 +380,7 @@ class GuardTest(unittest.TestCase):
         out = self.scan()
         self.assertIn('public.app_b_profiles', out)
         self.assertNotIn('public.app_a_legacy', out)
-        self.assertIn('DG_DONE\t1\t', out)
+        self.assertIn('DG_DONE\t2\t', out)
 
     def test_clone_fallback_latest_can_be_first(self):
         self.clone_fixture('topic-a', 'topic-b', 300, 200)
