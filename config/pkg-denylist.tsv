@@ -194,3 +194,93 @@ saturn-baileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で
 noxxleys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
 saturn-bail	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
 kasabaileys	*	PhantomSub 2026-09-28（WhatsApp のチャンネルへ無断で登録する）
+# --- 2026-11-17 に追加（正規のパッケージのリリース経路が侵害された件）---
+# TanStack（2026-05-11〜12、42 パッケージ × 2 版。GitHub Advisory の type=malware で版を確認・2026-11-17）
+# https://snyk.io/blog/tanstack-npm-packages-compromised/
+@tanstack/arktype-adapter	1.166.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-5v49-5jh3-j7wg
+@tanstack/arktype-adapter	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-5v49-5jh3-j7wg
+@tanstack/eslint-plugin-router	1.161.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-4q7x-8jvq-jpfv
+@tanstack/eslint-plugin-router	1.161.9	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-4q7x-8jvq-jpfv
+@tanstack/eslint-plugin-start	0.0.4	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8hwj-wqhq-3xw2
+@tanstack/eslint-plugin-start	0.0.7	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8hwj-wqhq-3xw2
+@tanstack/history	1.161.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-rmmr-r34h-pfm5
+@tanstack/history	1.161.9	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-rmmr-r34h-pfm5
+@tanstack/nitro-v2-vite-plugin	1.154.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qj9f-x9rw-w5v3
+@tanstack/nitro-v2-vite-plugin	1.154.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qj9f-x9rw-w5v3
+@tanstack/react-router	1.169.5	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-5q7g-gw3w-r3rh
+@tanstack/react-router	1.169.8	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-5q7g-gw3w-r3rh
+@tanstack/react-router-devtools	1.166.16	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qqw3-95q8-m7g4
+@tanstack/react-router-devtools	1.166.19	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qqw3-95q8-m7g4
+@tanstack/react-router-ssr-query	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q9q3-jp8x-cq8h
+@tanstack/react-router-ssr-query	1.166.18	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q9q3-jp8x-cq8h
+@tanstack/react-start	1.167.68	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-7cm2-482j-9rxq
+@tanstack/react-start	1.167.71	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-7cm2-482j-9rxq
+@tanstack/react-start-client	1.166.51	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8j42-6cpx-3c7g
+@tanstack/react-start-client	1.166.54	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8j42-6cpx-3c7g
+@tanstack/react-start-rsc	0.0.47	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-hv5h-gqr4-76v3
+@tanstack/react-start-rsc	0.0.50	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-hv5h-gqr4-76v3
+@tanstack/react-start-server	1.166.55	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-xf53-jqmx-h45h
+@tanstack/react-start-server	1.166.58	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-xf53-jqmx-h45h
+@tanstack/router-cli	1.166.46	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-7xj7-65hc-69fc
+@tanstack/router-cli	1.166.49	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-7xj7-65hc-69fc
+@tanstack/router-core	1.169.5	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-r8f9-7pfq-w872
+@tanstack/router-core	1.169.8	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-r8f9-7pfq-w872
+@tanstack/router-devtools	1.166.16	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-fc8c-vpgv-4wqg
+@tanstack/router-devtools	1.166.19	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-fc8c-vpgv-4wqg
+@tanstack/router-devtools-core	1.167.6	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8jwm-h66c-fj6r
+@tanstack/router-devtools-core	1.167.9	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8jwm-h66c-fj6r
+@tanstack/router-generator	1.166.45	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-4fcj-3grh-9fhv
+@tanstack/router-generator	1.166.48	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-4fcj-3grh-9fhv
+@tanstack/router-plugin	1.167.38	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-wp6c-87p2-r5xw
+@tanstack/router-plugin	1.167.41	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-wp6c-87p2-r5xw
+@tanstack/router-ssr-query-core	1.168.3	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-943h-v9jx-69h5
+@tanstack/router-ssr-query-core	1.168.6	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-943h-v9jx-69h5
+@tanstack/router-utils	1.161.11	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-3rg6-f8mh-5pvp
+@tanstack/router-utils	1.161.14	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-3rg6-f8mh-5pvp
+@tanstack/router-vite-plugin	1.166.53	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p6hw-732x-2qw7
+@tanstack/router-vite-plugin	1.166.56	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p6hw-732x-2qw7
+@tanstack/solid-router	1.169.5	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-34qr-xpfg-5g3g
+@tanstack/solid-router	1.169.8	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-34qr-xpfg-5g3g
+@tanstack/solid-router-devtools	1.166.16	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-gvq3-5frr-qqmp
+@tanstack/solid-router-devtools	1.166.19	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-gvq3-5frr-qqmp
+@tanstack/solid-router-ssr-query	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qjr3-33qv-w5rq
+@tanstack/solid-router-ssr-query	1.166.18	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-qjr3-33qv-w5rq
+@tanstack/solid-start	1.167.65	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8hxh-jf75-8g4x
+@tanstack/solid-start	1.167.68	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8hxh-jf75-8g4x
+@tanstack/solid-start-client	1.166.50	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-jh9w-85vm-vgm4
+@tanstack/solid-start-client	1.166.53	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-jh9w-85vm-vgm4
+@tanstack/solid-start-server	1.166.54	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-2gqf-jmq8-m7qw
+@tanstack/solid-start-server	1.166.57	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-2gqf-jmq8-m7qw
+@tanstack/start-client-core	1.168.5	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-68cm-p79h-wv3p
+@tanstack/start-client-core	1.168.8	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-68cm-p79h-wv3p
+@tanstack/start-fn-stubs	1.161.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-phm9-h72q-2rv5
+@tanstack/start-fn-stubs	1.161.9	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-phm9-h72q-2rv5
+@tanstack/start-plugin-core	1.169.23	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q8qg-3r28-j492
+@tanstack/start-plugin-core	1.169.26	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q8qg-3r28-j492
+@tanstack/start-server-core	1.167.33	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-gg66-jfg8-rcgq
+@tanstack/start-server-core	1.167.36	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-gg66-jfg8-rcgq
+@tanstack/start-static-server-functions	1.166.44	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-r9g7-9xhm-p5qp
+@tanstack/start-static-server-functions	1.166.47	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-r9g7-9xhm-p5qp
+@tanstack/start-storage-context	1.166.38	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-66j2-5c8h-j3f7
+@tanstack/start-storage-context	1.166.41	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-66j2-5c8h-j3f7
+@tanstack/valibot-adapter	1.166.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-wvhh-9pj7-jw99
+@tanstack/valibot-adapter	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-wvhh-9pj7-jw99
+@tanstack/virtual-file-routes	1.161.10	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-w9mx-wqhv-4cvw
+@tanstack/virtual-file-routes	1.161.13	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-w9mx-wqhv-4cvw
+@tanstack/vue-router	1.169.5	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p6r2-524x-2vh3
+@tanstack/vue-router	1.169.8	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p6r2-524x-2vh3
+@tanstack/vue-router-devtools	1.166.16	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-h7cj-xw74-w7h7
+@tanstack/vue-router-devtools	1.166.19	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-h7cj-xw74-w7h7
+@tanstack/vue-router-ssr-query	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8rxr-9xrf-66wv
+@tanstack/vue-router-ssr-query	1.166.18	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-8rxr-9xrf-66wv
+@tanstack/vue-start	1.167.61	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q3gx-rxh4-gv34
+@tanstack/vue-start	1.167.64	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-q3gx-rxh4-gv34
+@tanstack/vue-start-client	1.166.46	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p5mj-5p7c-22jr
+@tanstack/vue-start-client	1.166.49	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-p5mj-5p7c-22jr
+@tanstack/vue-start-server	1.166.50	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-fq44-7p43-9w49
+@tanstack/vue-start-server	1.166.53	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-fq44-7p43-9w49
+@tanstack/zod-adapter	1.166.12	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-xj4p-7xwr-q9jj
+@tanstack/zod-adapter	1.166.15	TanStack のリリース経路の侵害 2026-05-11（Mini Shai-Hulud・正しい来歴つきで公開・認証情報を盗む）GHSA-xj4p-7xwr-q9jj
+# @ethersphere/bee-js（2026-11-09、リリース経路の侵害。install で外部のコードを取って実行・財布の鍵を盗む。GHSA-hh7j-5m3j-23pf）
+# https://socket.dev/blog/bee-js-compromise
+@ethersphere/bee-js	13.3.0	bee-js のリリース経路の侵害 2026-11-09（postinstall で外部のコード・財布の鍵を盗む）GHSA-hh7j-5m3j-23pf
