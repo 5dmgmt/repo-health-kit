@@ -313,6 +313,13 @@ class GuardTest(unittest.TestCase):
         self.sql('create table if not exists app_a_profiles(id uuid, label text);', repo=other)
         self.assert_hit(self.scan(), 'WARN', 'table_collision')
 
+    def test_default_off_notes_are_not_unchecked(self):
+        out = self.scan()
+        for kind in ('catalog_disabled', 'probe_disabled', 'site_disabled'):
+            self.assert_hit(out, 'NOTE', kind)
+            line = next(row for row in out.splitlines() if f'\t{kind}\t' in row)
+            self.assertNotIn('未検査', line)
+
     def test_table_collision_dropped_later(self):
         self.write('supabase/.temp/project-ref', REF)
         other = self.new_repo('app-b', REF)

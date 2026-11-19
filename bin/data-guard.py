@@ -1374,7 +1374,8 @@ def main():
     for index, site in enumerate(dict.fromkeys(sites), 1):
         site_scan(site, index, guard)
     if not sites:
-        guard.emit('NOTE', 'site_disabled', '-', '-', '本番サイトは URL 未設定のため未検査です')
+        # 既定オフの項目は「未検査」と書かない（本体が未検査の連続日数で WARN に上げるため。目録・公開鍵の実測と同じ扱い）
+        guard.emit('NOTE', 'site_disabled', '-', '-', '本番サイトの外形点検は既定オフです（RH_SITE_URLS 未設定・本番は未確認）')
     # 本体は「渡した git のリポの数」と照らし合わせて最後まで動いたかを見るので、省いた別の clone も含め、git でないフォルダは除いた数を返す
     print(f'DG_DONE\t{len({x for x in paths if (x / ".git").exists()})}\t{guard.statements}', flush=True)
     return 0
