@@ -566,6 +566,12 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
             created[target][str(src.repo.path)].add(table_body_hash(sql, m.end()))
             if target not in tables or not re.search(r'if\s+not\s+exists', sql, re.I):
                 tables[target] = {'source': src, 'rls': False, 'columns': set(TENANT.findall(sql)), 'grant': False}
+        # 後の migration で消した表は、表名のかぶり・RLS の点検から外します（ファイル名の順に読むので、消した後に作り直せば再び数えます）。
+        m = re.match(rf'drop\s+table\s+(?:if\s+exists\s+)?({NAME}(?:\s*,\s*{NAME})*)', sql, re.I)
+        if m:
+            for dropped in re.findall(NAME, m[1]):
+                created.pop(table_name(dropped), None)
+                tables.pop(table_name(dropped), None)
         m = re.match(rf'alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({NAME})\s+(.*)', sql, re.I | re.S)
         if m:
             target, action = table_name(m[1]), m[2]

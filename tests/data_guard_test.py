@@ -313,6 +313,25 @@ class GuardTest(unittest.TestCase):
         self.sql('create table if not exists app_a_profiles(id uuid, label text);', repo=other)
         self.assert_hit(self.scan(), 'WARN', 'table_collision')
 
+    def test_table_collision_dropped_later(self):
+        self.write('supabase/.temp/project-ref', REF)
+        other = self.new_repo('app-b', REF)
+        self.sql('create table if not exists app_a_profiles(id uuid);')
+        self.sql('create table if not exists app_a_profiles(id uuid, label text);', repo=other)
+        self.sql('drop table if exists public.app_a_profiles, app_a_other cascade;', '002.sql', other)
+        out = self.scan()
+        self.assert_no_hit(out, 'table_collision')
+        self.assert_no_hit(out, 'rls_off')
+
+    def test_table_collision_recreated_after_drop(self):
+        self.write('supabase/.temp/project-ref', REF)
+        other = self.new_repo('app-b', REF)
+        self.sql('create table app_a_profiles(id uuid);')
+        self.sql('drop table app_a_profiles;', '002.sql')
+        self.sql('create table app_a_profiles(id uuid, label text);', '003.sql', other)
+        self.sql('create table app_a_profiles(id uuid, note text);', '004.sql')
+        self.assert_hit(self.scan(), 'WARN', 'table_collision')
+
     def test_table_collision_same_definition(self):
         self.write('supabase/.temp/project-ref', REF)
         other = self.new_repo('app-b', REF)
