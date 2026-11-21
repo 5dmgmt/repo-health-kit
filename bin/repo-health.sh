@@ -503,7 +503,8 @@ check_data_guard() {
   local output="$TMP_DIR/data-guard.tsv" valid_rows="$TMP_DIR/data-guard-valid.tsv" rc=0 tag level kind repo target message item
   local limit="${RH_DATA_GUARD_TIMEOUT:-300}"
   if [ "${RH_DATA_GUARD:-1}" = "0" ]; then
-    NOTES[${#NOTES[@]}]="データの守りの点検は RH_DATA_GUARD=0 のため未検査"
+    # 利用者が自分で止めた点検は「未検査」と書かない（未検査の連続日数で WARN に上げるため）
+    NOTES[${#NOTES[@]}]="データの守りの点検は止めています（設定 RH_DATA_GUARD=0）"
     return
   fi
   if ! is_uint "$limit" || [ "$limit" -eq 0 ]; then
@@ -881,7 +882,7 @@ audit_manifest() {
     return
   fi
   if [ "$RH_SKIP_AUDIT" = 1 ]; then
-    add_detail "$label — $tool audit は RH_SKIP_AUDIT=1 のため未検査"
+    add_detail "$label — $tool audit は止めています（設定 RH_SKIP_AUDIT=1）"
     return
   fi
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -925,7 +926,7 @@ audit_composer_lock() {
   rel="${manifest_dir#"$repo"/}"
   if [ "$manifest_dir" = "$repo" ]; then label="$repo_name"; else label="$repo_name/$(quote_name "$rel")"; fi
   if [ "$RH_SKIP_AUDIT" = 1 ]; then
-    add_detail "$label — composer audit は RH_SKIP_AUDIT=1 のため未検査"
+    add_detail "$label — composer audit は止めています（設定 RH_SKIP_AUDIT=1）"
     return
   fi
   composer_path="${RH_COMPOSER_PATH-$(command -v composer 2>/dev/null || true)}"
@@ -1139,7 +1140,7 @@ check_repo() {
     note_self_managed_gitlab_origin "$origin_url"
     if [ "$RH_SKIP_FETCH" = "1" ]; then
       fetch="SKIP"
-      add_detail "$repo_name — fetch は RH_SKIP_FETCH=1 のため未検査"
+      add_detail "$repo_name — fetch は止めています（設定 RH_SKIP_FETCH=1）"
     elif run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
       || { sleep 3; run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
       streak_reset "fetch-$REPO_STATE_KEY"
@@ -1180,7 +1181,8 @@ check_repo() {
   fi
   if is_uint "$ahead" && [ "$ahead" -gt 0 ]; then add_warning "$repo_name — 未push $ahead 件"; fi
 
-  git_status_count="$(rh_git -C "$repo" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  # Claude Code の作業フォルダ（.claude/worktrees）の中身は、リポの dirty に数えない
+  git_status_count="$(rh_git -C "$repo" status --porcelain -- . ':(exclude).claude/worktrees' 2>/dev/null | wc -l | tr -d ' ')"
   is_uint "$git_status_count" || git_status_count=0
   dirty="$git_status_count"
   stash="$(rh_git -C "$repo" stash list 2>/dev/null | wc -l | tr -d ' ')"
@@ -1423,7 +1425,7 @@ check_cli_tools() {
   local tool path current latest target duplicate duplicate_version current_major latest_major
   local package wait_note remedy
   if [ "$RH_SKIP_CLI" = "1" ]; then
-    NOTES[${#NOTES[@]}]="CLI 更新確認は RH_SKIP_CLI=1 のため未検査"
+    NOTES[${#NOTES[@]}]="CLI 更新確認は止めています（設定 RH_SKIP_CLI=1）"
     return
   fi
   for tool in claude codex node npm gh vercel supabase op; do
@@ -3009,7 +3011,7 @@ check_tls_security() {
   local label kind path remedy url subject connected rejected unknown rc apple_connected
   local python_formula python_remedy connected_subject apple_subject
   if [ "$RH_TLS_PROBE" = "0" ]; then
-    NOTES[${#NOTES[@]}]="証明書の点検は RH_TLS_PROBE=0 のため未検査"
+    NOTES[${#NOTES[@]}]="証明書の点検は止めています（設定 RH_TLS_PROBE=0）"
     return
   fi
   if [ ! -f "$TLS_PROBES" ]; then
@@ -3086,7 +3088,7 @@ check_tls_security() {
 check_software_updates() {
   local output labels label security_labels other_labels
   if [ "$RH_SKIP_SOFTWAREUPDATE" = "1" ]; then
-    NOTES[${#NOTES[@]}]="macOS のアップデート確認は RH_SKIP_SOFTWAREUPDATE=1 のため未検査"
+    NOTES[${#NOTES[@]}]="macOS のアップデート確認は止めています（設定 RH_SKIP_SOFTWAREUPDATE=1）"
     return
   fi
   if ! command -v softwareupdate >/dev/null 2>&1; then
@@ -3123,7 +3125,7 @@ EOF
 check_kit_update() {
   local current latest
   if [ "$RH_KIT_UPDATE_CHECK" = "0" ]; then
-    NOTES[${#NOTES[@]}]="repo-health-kit の更新確認は RH_KIT_UPDATE_CHECK=0 のため未検査"
+    NOTES[${#NOTES[@]}]="repo-health-kit の更新確認は止めています（設定 RH_KIT_UPDATE_CHECK=0）"
     return
   fi
   current="$(sed -n '1p' "$KIT_DIR/VERSION" 2>/dev/null || true)"
@@ -3265,7 +3267,7 @@ check_installed_software() {
     SOFTWARE_SKIP_TOOLS_EFFECTIVE="$SOFTWARE_SKIP_TOOLS_EFFECTIVE claude codex node npm gh vercel supabase op"
   fi
   if [ "$RH_SKIP_SOFTWARE" = "1" ]; then
-    NOTES[${#NOTES[@]}]="入っているソフトの更新確認は未検査"
+    NOTES[${#NOTES[@]}]="入っているソフトの更新確認は止めています（設定 RH_SKIP_SOFTWARE=1）"
     return
   fi
 
@@ -3994,7 +3996,7 @@ check_node_kegs_health() {
 
 check_mac_security() {
   if [ "$RH_SKIP_SECURITY" = "1" ]; then
-    NOTES[${#NOTES[@]}]="Mac のセキュリティ点検は RH_SKIP_SECURITY=1 のため未検査"
+    NOTES[${#NOTES[@]}]="Mac のセキュリティ点検は止めています（設定 RH_SKIP_SECURITY=1）"
     return
   fi
   check_brew_security
@@ -4136,7 +4138,7 @@ for root in "${RH_ROOTS[@]+"${RH_ROOTS[@]}"}"; do
 done
 
 # git 管理外のフォルダは点検できないので、黙って飛ばさずに知らせる。
-# 空のフォルダと隠しフォルダは参考扱い、RH_NONGIT_IGNORE に書いた名前も参考扱いにする。
+# 空のフォルダは参考扱い、隠しフォルダは対象外（数えない）、RH_NONGIT_IGNORE に書いた名前も参考扱いにする。
 note_non_git_dir() {
   local dir="$1" name ignored
   name="$(basename "$dir")"

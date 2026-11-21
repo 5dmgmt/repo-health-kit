@@ -11,7 +11,8 @@ if [ "${RH_NO_LAUNCHCTL:-0}" != "1" ] && command -v launchctl >/dev/null 2>&1; t
 fi
 
 rm -f "$PLIST_FILE"
-rm -f "$INSTALL_DIR/bin/repo-health.sh" "$INSTALL_DIR/bin/pkg-denylist-scan.py"
+# install.sh が置くファイルと同じ並びで消します（食い違いは tests/run-tests.sh が照らし合わせます）。
+rm -f "$INSTALL_DIR/bin/repo-health.sh" "$INSTALL_DIR/bin/pkg-denylist-scan.py" "$INSTALL_DIR/bin/data-guard.py"
 rm -f "$INSTALL_DIR/VERSION"
 rm -f "$INSTALL_DIR/config/pkg-denylist.tsv" "$INSTALL_DIR/config/security-packages.txt"
 rm -f "$INSTALL_DIR/config/security-minimums.tsv" "$INSTALL_DIR/config/tls-probes.tsv"

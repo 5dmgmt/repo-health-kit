@@ -482,6 +482,19 @@ printf '%s 2\n' "$yesterday" > "$state_file"
 run_health "$case_dir" "$case_dir/root with space"
 assert_contains 'dirty 3日目は WARN' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty 1件が3日連続'
 
+# 0.7.1: Claude Code の作業フォルダ（.claude/worktrees）だけが未追跡のリポは、dirty に数えない
+case_dir="$TEST_TMP/dirty-worktrees"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" wtrepo
+mkdir -p "$REPO_PATH/.claude/worktrees/x"
+printf 'work\n' > "$REPO_PATH/.claude/worktrees/x/a.txt"
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '.claude/worktrees だけが未追跡のリポは dirty 0 件' "$case_dir/output.txt" '「wtrepo」 — fetch=SKIP .* dirty=0 '
+assert_not_contains '.claude/worktrees だけが未追跡のリポは作業中にも出さない' "$case_dir/output.txt" '「wtrepo」 — dirty [0-9]+件'
+printf 'real\n' > "$REPO_PATH/real.txt"
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '作業フォルダの外の未追跡ファイルは今までどおり dirty に数える' "$case_dir/output.txt" 'dirty 1件（1日目・作業中）'
+
 case_dir="$TEST_TMP/denylist"
 mkdir -p "$case_dir"
 make_remote_repo "$case_dir" denyrepo
@@ -543,6 +556,42 @@ if [ -f "$case_dir/home/.config/repo-health-kit/config.sh" ] \
   pass 'uninstall 後も設定とログを残す'
 else
   fail 'uninstall 後も設定とログを残す'
+fi
+
+# 0.7.1: install.sh が置くファイルを uninstall.sh がすべて消す。置く一覧と消す一覧の食い違いも照らし合わせる。
+install_root="$case_dir/home/Library/Application Support/repo-health-kit"
+if [ ! -e "$install_root/bin" ] && [ ! -e "$install_root/config" ] \
+  && [ -z "$(find "$install_root" -type f -not -path "$install_root/state/*" -print -quit 2>/dev/null)" ]; then
+  pass 'uninstall は本体・data-guard.py・設定表を残さず、空になった bin と config も消す'
+else
+  fail 'uninstall は本体・data-guard.py・設定表を残さず、空になった bin と config も消す'
+  find "$install_root" -print
+fi
+installed_list="$(sed -n 's#^install -m [0-9]* .* "\$INSTALL_DIR/\([^"]*\)".*#\1#p' "$PROJECT_DIR/install.sh" | LC_ALL=C sort)"
+removed_list="$(grep '^rm -f ' "$PROJECT_DIR/uninstall.sh" | grep -o '"\$INSTALL_DIR/[^"]*"' | sed 's#^"\$INSTALL_DIR/##; s#"$##' | LC_ALL=C sort)"
+if [ -n "$installed_list" ] && [ "$installed_list" = "$removed_list" ] && printf '%s\n' "$installed_list" | grep -qx 'bin/data-guard.py'; then
+  pass 'install.sh が置くファイルの一覧と uninstall.sh が消す一覧が一致する'
+else
+  fail 'install.sh が置くファイルの一覧と uninstall.sh が消す一覧が一致する'
+  diff <(printf '%s\n' "$installed_list") <(printf '%s\n' "$removed_list")
+fi
+
+# 点検の状態（state）を INSTALL_DIR の外へ出して回すと、uninstall のあと INSTALL_DIR の下にファイルが 1 つも残らない
+case_dir="$TEST_TMP/install-clean"
+mkdir -p "$case_dir/home"
+HOME="$case_dir/home" RH_STATE_DIR="$case_dir/state" RH_NO_LAUNCHCTL=1 RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_NO_DESKTOP=1 \
+  RH_SKIP_SECURITY=1 \
+  /bin/bash "$PROJECT_DIR/install.sh" > "$case_dir/install-output.txt" 2>&1
+install_rc=$?
+HOME="$case_dir/home" RH_NO_LAUNCHCTL=1 /bin/bash "$PROJECT_DIR/uninstall.sh" > "$case_dir/uninstall-output.txt" 2>&1
+uninstall_rc=$?
+install_root="$case_dir/home/Library/Application Support/repo-health-kit"
+if [ "$install_rc" -eq 0 ] && [ "$uninstall_rc" -eq 0 ] && [ -z "$(find "$install_root" -type f -print -quit 2>/dev/null)" ]; then
+  pass 'uninstall のあと INSTALL_DIR の下にファイルが 1 つも残らない'
+else
+  fail 'uninstall のあと INSTALL_DIR の下にファイルが 1 つも残らない'
+  find "$install_root" -print 2>/dev/null
+  sed -n '1,60p' "$case_dir/install-output.txt"
 fi
 
 case_dir="$TEST_TMP/security-ca"
@@ -2948,6 +2997,57 @@ assert_not_contains '点検日が空いた未検査を連続3日とは数えな�
 run_security "$case_dir" "$fake_bin" RH_TODAY=2026-10-05 FAKE_BREW_UPDATE_RC=1 FAKE_BREW_LOG="$case_dir/brew.log"
 assert_contains '数え直した未検査も3日目に WARN' "$case_dir/output.txt" 'WARN .*未検査.*3日目'
 
+# 0.7.1: 利用者が自分で止めた点検は「止めています（設定 RH_…）」と書き、未検査の連続日数の WARN に上げない。
+case_dir="$TEST_TMP/k1-stopped-checks"
+make_remote_repo "$case_dir" stoppedrepo
+printf '{"name":"fixture","version":"1.0.0"}\n' > "$REPO_PATH/package.json"
+printf '%s\n' '{"name":"fixture","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}' > "$REPO_PATH/package-lock.json"
+git -C "$REPO_PATH" add package.json package-lock.json
+git -C "$REPO_PATH" commit -q -m 'test: lock'
+git -C "$REPO_PATH" push -q
+for day in 01 02 03; do
+  run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/missing-bin" \
+    RH_DATA_GUARD=0 RH_SKIP_AUDIT=1 RH_SKIP_FETCH=1 RH_TODAY="2026-10-$day"
+done
+assert_contains 'RH_DATA_GUARD=0 は「止めています」と書く' "$case_dir/output.txt" 'データの守りの点検は止めています（設定 RH_DATA_GUARD=0）'
+assert_contains 'RH_SKIP_AUDIT=1 は「止めています」と書く' "$case_dir/output.txt" 'npm audit は止めています（設定 RH_SKIP_AUDIT=1）'
+assert_contains 'RH_SKIP_FETCH=1 は「止めています」と書く' "$case_dir/output.txt" 'fetch は止めています（設定 RH_SKIP_FETCH=1）'
+assert_contains 'RH_SKIP_SECURITY=1 は「止めています」と書く' "$case_dir/output.txt" 'Mac のセキュリティ点検は止めています（設定 RH_SKIP_SECURITY=1）'
+assert_not_contains '止めたデータの守り・audit・fetch・Mac のセキュリティ点検は3日続いても未検査の WARN に上げない' "$case_dir/output.txt" 'WARN .*(RH_DATA_GUARD=0|RH_SKIP_AUDIT=1|RH_SKIP_FETCH=1|RH_SKIP_SECURITY=1).*未検査が続いて'
+
+case_dir="$TEST_TMP/security-stopped-checks"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+for day in 01 02 03; do
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TODAY="2026-10-$day" \
+    RH_SKIP_CLI=1 RH_TLS_PROBE=0 RH_SKIP_SOFTWAREUPDATE=1 RH_SKIP_SOFTWARE=1 RH_KIT_UPDATE_CHECK=0
+done
+assert_contains 'RH_SKIP_CLI=1 は「止めています」と書く' "$case_dir/output.txt" 'CLI 更新確認は止めています（設定 RH_SKIP_CLI=1）'
+assert_contains 'RH_TLS_PROBE=0 は「止めています」と書く' "$case_dir/output.txt" '証明書の点検は止めています（設定 RH_TLS_PROBE=0）'
+assert_contains 'RH_SKIP_SOFTWAREUPDATE=1 は「止めています」と書く' "$case_dir/output.txt" 'macOS のアップデート確認は止めています（設定 RH_SKIP_SOFTWAREUPDATE=1）'
+assert_contains 'RH_SKIP_SOFTWARE=1 は「止めています」と書く' "$case_dir/output.txt" '入っているソフトの更新確認は止めています（設定 RH_SKIP_SOFTWARE=1）'
+assert_contains 'RH_KIT_UPDATE_CHECK=0 は「止めています」と書く' "$case_dir/output.txt" 'repo-health-kit の更新確認は止めています（設定 RH_KIT_UPDATE_CHECK=0）'
+assert_not_contains '止めた CLI・証明書・macOS アップデート・ソフト更新・kit の更新確認は3日続いても未検査の WARN に上げない' "$case_dir/output.txt" 'WARN .*(RH_SKIP_CLI=1|RH_TLS_PROBE=0|RH_SKIP_SOFTWAREUPDATE=1|RH_SKIP_SOFTWARE=1|RH_KIT_UPDATE_CHECK=0).*未検査が続いて'
+assert_not_contains '止めた点検だけなら、3日目でも未検査の継続 WARN は 1 件も出ない' "$case_dir/output.txt" '未検査が続いて'
+
+# 止めていないのに見られなかった点検は、今までどおり「未検査」を数えて3日目に WARN にする。
+case_dir="$TEST_TMP/security-unchecked-not-stopped"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_exit_command "$fake_bin/apple-curl" 6
+make_exit_command "$fake_bin/softwareupdate" 1
+: > "$case_dir/brew.log"
+for day in 01 02 03; do
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_TODAY="2026-10-$day" \
+    RH_TLS_PROBE=1 RH_SKIP_SOFTWAREUPDATE=0 \
+    RH_PROBE_APPLE_CURL="$fake_bin/apple-curl" RH_PROBE_APPLE_PYTHON="$fake_bin/missing-apple-python" \
+    RH_PROBE_BREW_CURL="$fake_bin/missing-brew-curl" RH_PROBE_NODE="$fake_bin/missing-node" RH_PROBE_PYTHON="$fake_bin/missing-python"
+  if [ "$day" != 03 ]; then assert_not_contains "$day: 止めていない未検査も初日・2日目は継続 WARN を出さない" "$case_dir/output.txt" '未検査が続いて'; fi
+done
+assert_contains 'RH_TLS_PROBE=1 で接続できなければ3日目に WARN' "$case_dir/output.txt" 'WARN  .*証明書の点検は接続できず未検査（未検査が続いて3日目'
+assert_contains 'RH_SKIP_SOFTWAREUPDATE=0 で確認できなければ3日目に WARN' "$case_dir/output.txt" 'WARN  macOS のアップデート確認は未検査（未検査が続いて3日目'
+
 case_dir="$TEST_TMP/k1-stale-lock"
 mkdir -p "$case_dir/home" "$case_dir/root" "$case_dir/state/run.lock"
 python3 - "$case_dir/state/run.lock" <<'PY'
@@ -3329,7 +3429,8 @@ done
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1 \
   RH_DATA_GUARD_SCANNER="$case_dir/scanner.py" K2_CALL_LOG="$case_dir/calls" RH_DATA_GUARD=0
 assert_count 'RH_DATA_GUARD=0 ならデータの守りを呼ばない' "$case_dir/calls" '^call$' 0
-assert_contains 'RH_DATA_GUARD=0 は未検査として注記する' "$case_dir/output.txt" 'データの守りの点検は RH_DATA_GUARD=0 のため未検査'
+assert_contains 'RH_DATA_GUARD=0 は「止めています」として注記する（0.7.1 で「未検査」から変更）' "$case_dir/output.txt" 'データの守りの点検は止めています（設定 RH_DATA_GUARD=0）'
+assert_not_contains 'RH_DATA_GUARD=0 は未検査と書かない' "$case_dir/output.txt" 'RH_DATA_GUARD=0.*未検査'
 cp "$TEST_TMP/k1-mail/fake-bin/security" "$TEST_TMP/k1-mail/fake-bin/curl" "$fake_bin/"
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_MAIL_METHOD=resend RH_NOMAIL=0 \
   RH_MAIL_TO=fixture@example.invalid FAKE_MAIL_PAYLOAD="$case_dir/mail.json" \

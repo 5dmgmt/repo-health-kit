@@ -4,7 +4,7 @@
 
 ## 自動の点検
 
-`bin/data-guard.py` は全リポをまとめて1回読みます。共有する Supabase プロジェクトでは、別アプリの利用者にも同じ認証基盤が使われるため、ログインだけを条件にした方針を FAIL に上げます。ref は `supabase/.temp/project-ref`、公開 URL の順に見つけ、表示は先頭4字にします。
+`bin/data-guard.py` は全リポをまとめて1回読みます。共有する Supabase プロジェクトでは、別アプリの利用者にも同じ認証基盤が使われるため、ログインだけを条件にした方針を FAIL に上げます。ref は `supabase/.temp/project-ref`、公開 URL の順に見つけ（`project-ref` が見つかれば公開 URL は読みません）、表示は先頭4字にします。`.claude`（Claude Code の作業フォルダ・worktree）、直下に `.git` を持つ入れ子の checkout（git worktree・サブモジュールを含む）、`.vercel`・`.turbo` は本流ではないので読みません。`dist`・`build`・`out`・`coverage` も、親のフォルダに `package.json` があるとき（リポの根・monorepo の各パッケージの根）だけ、ビルドの出力として読みません。`app/api/build/` や `lib/out/` のようなソースのフォルダは読みます。
 
 静的 SQL は `supabase/migrations`・`supabase/schemas` と、それ以外の SQL の関連する DDL を読みます。ファイル名順に CREATE・ALTER・DROP、RLS の有効・無効、方針の変更、表の改名を追います。共有 ref のリポはまとめて追いますが、別リポ間の本番への適用順は確定できません。同じファイル名の変更はパス順で照合するため、本番の目録と合わせて確認してください。
 

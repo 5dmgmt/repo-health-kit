@@ -436,6 +436,68 @@ class GuardTest(unittest.TestCase):
         self.assert_hit(out, 'INFO', 'shared_project')
         self.assertNotIn('OTHER_SECRET', out)
 
+    def test_project_ref_file_is_not_mixed_with_other_files(self):
+        # supabase/.temp/project-ref が見つかったら、ほかのファイルの公開 URL は ref として読まない
+        other = 'zyxwvutsrqponmlkjihg'
+        repo_p = self.new_repo('app-p', REF)
+        self.write('lib/url.ts', f'export const url = "https://{other}.supabase.co";', repo_p)
+        self.new_repo('app-q', other)
+        self.assert_no_hit(self.scan(), 'shared_project')
+
+    def test_work_folders_and_nested_checkouts_are_not_read(self):
+        leak = 'create table {}(id uuid);'
+        self.sql(leak.format('app_a_profiles'))
+        # Claude Code の作業フォルダ（worktree）・.git ファイルを持つ git worktree・.git フォルダを持つ入れ子の checkout
+        self.write('.claude/worktrees/agent-x/supabase/migrations/001.sql', leak.format('leak_claude'))
+        self.write('copy-a/supabase/migrations/001.sql', leak.format('leak_worktree'))
+        (self.repo / 'copy-a/.git').write_text('gitdir: /nonexistent/worktrees/copy-a\n')
+        self.write('packages/copy-b/supabase/migrations/001.sql', leak.format('leak_nested'))
+        (self.repo / 'packages/copy-b/.git').mkdir()
+        out = self.scan()
+        self.assertIn('public.app_a_profiles', out)
+        for name in ('leak_claude', 'leak_worktree', 'leak_nested'):
+            self.assertNotIn(name, out)
+
+    def test_build_output_folders_are_not_read(self):
+        # dist・build・out・coverage は、親に package.json があるとき（リポの根・パッケージの根）だけ読まない。.vercel・.turbo はどの深さでも読まない
+        url = f'export const u = "https://{REF}.supabase.co";'
+        self.write('package.json', '{}')
+        self.write('packages/p/package.json', '{}')
+        self.sql('create table app_a_profiles(id uuid);')
+        self.write('dist/x.js', url)
+        self.write('packages/p/dist/x.js', url)
+        for folder in ('dist', 'build', 'out', 'coverage'):
+            self.write(f'{folder}/supabase/migrations/001.sql', 'create table leak_root_' + folder + '(id uuid);')
+            self.write(f'packages/p/{folder}/supabase/migrations/001.sql', 'create table leak_pkg_' + folder + '(id uuid);')
+        for folder in ('.vercel', '.turbo'):
+            name = folder.strip('.')
+            self.write(f'{folder}/supabase/migrations/001.sql', 'create table leak_root_' + name + '(id uuid);')
+            self.write(f'apps/web/{folder}/supabase/migrations/001.sql', 'create table leak_web_' + name + '(id uuid);')
+        self.new_repo('app-b', REF)
+        out = self.scan()
+        self.assertIn('public.app_a_profiles', out)
+        self.assertNotIn('leak_', out)
+        # dist/x.js を読めば app-a も REF を持ち、app-b と共有になる
+        self.assert_no_hit(out, 'shared_project')
+
+    def test_source_folders_named_like_build_output_are_read(self):
+        # package.json のない親の下の build・out・dist などは、ソースとして読む
+        self.write('package.json', '{}')
+        self.write('app/page.tsx', "'use client';\nimport { db } from '../lib/out/db';")
+        self.write('lib/out/db.ts', 'const db = process.env.SUPABASE_SERVICE_ROLE_KEY;')
+        self.write('app/api/build/route.ts', 'export function POST() {}')
+        self.write('sub/dist/x.js', f'export const u = "https://{REF}.supabase.co";')
+        for folder in ('dist', 'build', 'out', 'coverage'):
+            self.write(f'sub/{folder}/supabase/migrations/001.sql', 'create table leak_sub_' + folder + '(id uuid);')
+        self.new_repo('app-b', REF)
+        out = self.scan()
+        # lib/out/db.ts を読めたので、それを import する app/page.tsx が FAIL になる
+        self.assertRegex(out, r'FAIL\tbrowser_service_key\t[^\n]*app/page\.tsx')
+        self.assertRegex(out, r'api_auth_unknown\t[^\n]*app/api/build/route\.ts')
+        self.assert_hit(out, 'INFO', 'shared_project')
+        for folder in ('dist', 'build', 'out', 'coverage'):
+            self.assertIn('leak_sub_' + folder, out)
+
     def test_browser_env(self):
         self.write('.env.local', 'NEXT_PUBLIC_SERVICE_ROLE_KEY=' + FAKE_PASSWORD)
         self.assert_hit(self.scan(), 'FAIL', 'browser_env')
@@ -550,6 +612,12 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
     def test_static_bundle_jwt(self):
         self.write('.next/static/app.js', 'const a="' + jwt('service_role') + '";')
         self.assert_hit(self.scan(), 'FAIL', 'browser_service_key')
+
+    def test_static_bundle_routes_named_like_build_output(self):
+        # 配信物の route 名が build・out・dist でも読み落とさない（ソースの除外とは分ける）
+        for route in ('build', 'out', 'dist'):
+            self.write(f'.next/static/chunks/app/{route}/page.js', 'const a="' + jwt('service_role') + '";')
+        self.assertEqual(self.scan().count('DG\tFAIL\tbrowser_service_key\t'), 3)
 
     def test_static_bundle_anon(self):
         self.write('.next/static/app.js', 'const a="' + jwt('anon') + '";')

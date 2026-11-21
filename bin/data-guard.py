@@ -20,7 +20,14 @@ import time
 from urllib.parse import unquote, urljoin, urlsplit, quote
 
 JST = timezone(timedelta(hours=9))
-SKIP = {'.git', 'node_modules', 'vendor', '.next', '.venv', 'venv', '__pycache__', '.tmp-dg'}
+SKIP_BASE = {'.git', 'node_modules', 'vendor', '.next', '.venv', 'venv', '__pycache__', '.tmp-dg'}
+# .vercel・.turbo はどの深さでも読みません。
+SKIP = SKIP_BASE | {'.vercel', '.turbo'}
+# dist・build・out・coverage は、親フォルダに package.json があるとき（リポの根・monorepo の各パッケージの根）だけ、ビルドの出力として読みません。
+# app/api/build/ や lib/out/ のようなソースのフォルダを読み落とさないためです。
+BUILD_OUT = {'dist', 'build', 'out', 'coverage'}
+# Claude Code の作業フォルダ（worktree・設定の置き場）は本流ではないので降りません。
+WORK_DIRS = {'.claude'}
 IDENT = r'(?:"(?:[^"]|"")+"|[a-zA-Z_][\w$]*)'
 NAME = rf'{IDENT}(?:\s*\.\s*{IDENT})?'
 REF_URL = re.compile(r'https://([a-z0-9]{20})\.supabase\.co\b')
@@ -58,11 +65,25 @@ def read(path: Path) -> str:
     return path.read_text(encoding='utf-8', errors='replace')
 
 
-def files(repo: Path):
+def files(repo: Path, *, bundle=False):
+    """本流のファイルを返します。作業フォルダ（.claude）と、直下に .git を持つ入れ子の checkout・git worktree には降りません。
+
+    bundle=True はブラウザ配信物（.next/static）用です。route 名の build・out・dist などを読み落とさないよう、元の除外だけを使います。"""
     def failed(_error):
         raise OSError('walk')
+
+    def readable(root, d):
+        path = Path(root) / d
+        if path.is_symlink():
+            return False
+        if bundle:
+            return d not in SKIP_BASE
+        if d in BUILD_OUT and os.path.isfile(Path(root) / 'package.json'):
+            return False
+        return d not in SKIP and d not in WORK_DIRS and not os.path.lexists(path / '.git')
+
     for root, dirs, names in os.walk(repo, followlinks=False, onerror=failed):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP and not (Path(root) / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if readable(root, d))
         for filename in sorted(names):
             path = Path(root) / filename
             if not path.is_symlink():
@@ -851,7 +872,7 @@ def source_scan(repo: Repo, guard: Guard):
             guard.finding('FAIL', 'browser_service_key', repo, f'{repo.label}:{rel}', 'ブラウザ側から service_role・秘密の参照があります', protected=True)
     bundle_dir = repo.path / '.next/static'
     if bundle_dir.is_dir():
-        for path in files(bundle_dir):
+        for path in files(bundle_dir, bundle=True):
             if path.suffix in {'.js', '.map', '.json'} and has_secret(read(path)):
                 rel = path.relative_to(repo.path).as_posix()
                 guard.finding('FAIL', 'browser_service_key', repo, f'{repo.label}:{rel}', 'ブラウザ配信物に service_role の JWT・秘密鍵の型があります', protected=True)

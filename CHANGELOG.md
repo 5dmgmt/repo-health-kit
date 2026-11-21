@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 - 2026-11-21
 
 - 後の migration で `drop table` した表を、表名のかぶり（table_collision）と RLS の点検から外すようにしました。これまでは消した表もかぶりとして WARN に残っていました。消した後に作り直した表は、また数えます。
 - 本番サイトの外形点検（`RH_SITE_URLS`）を設定していないときの知らせを、本番の目録・公開鍵の実測と同じ「既定オフ」の書き方にしました。これまでは「未検査」と書いていたため、3 日目から WARN に上がっていました。
 - 侵害パッケージの照合リストに、TanStack（2026-05、42 パッケージ × 2 版）と @ethersphere/bee-js 13.3.0（2026-11-09）を足しました。どちらも正規のパッケージのリリース経路が侵害されたもので、版は GitHub Advisory で確かめています。
+- データの守りが、`.claude`（Claude Code の作業フォルダ・worktree）、直下に `.git` を持つ入れ子の checkout、`.vercel`・`.turbo` を読まないようにしました。`dist`・`build`・`out`・`coverage` は、親のフォルダに `package.json` があるとき（リポの根・monorepo の各パッケージの根）だけ読みません。`app/api/build/` や `lib/out/` のようなソースのフォルダは、これまでどおり読みます。これまでは作業フォルダの中の migration を本流として読み、WARN に上げていました。手元の `.next/static` は、route 名が `build`・`out` などでも読み落とさないよう、元の除外のままです。
+- リポの dirty の数から `.claude/worktrees` の中を除きました。作業フォルダだけが未追跡のリポが、dirty として数えられていました。
+- 設定で自分から止めた点検（`RH_DATA_GUARD=0`・`RH_SKIP_AUDIT=1`・`RH_SKIP_FETCH=1`・`RH_SKIP_CLI=1`・`RH_TLS_PROBE=0`・`RH_SKIP_SOFTWAREUPDATE=1`・`RH_SKIP_SOFTWARE=1`・`RH_SKIP_SECURITY=1`・`RH_KIT_UPDATE_CHECK=0`）を、「未検査」ではなく「止めています（設定 RH_…）」と書くようにしました。これまでは「未検査」と書いていたため、3 日目から WARN に上がっていました。応答がない・権限がないなどで本当に見られなかったときの「未検査」は、今までどおり数えます。
+- `uninstall.sh` が `bin/data-guard.py` を残していたのを直しました。install が置くファイルをすべて消し、空になった `bin` と `config` も消します。置く一覧と消す一覧の食い違いは、テストで照らし合わせます。
+- README に `RH_DATA_GUARD=0` と、止めた点検の扱いを足しました。「`.` で始まるフォルダは参考扱い」の説明は、実装（対象外・数えない）に合わせました。
 
 ## 0.7.0 - 2026-11-16
 
@@ -55,7 +60,7 @@
 
 ## 0.4.3 - 2026-10-23
 
-- 点検ルート直下の git 管理外のフォルダを WARN で知らせます（`RH_WARN_NONGIT`、初期値 1）。空のフォルダ・隠しフォルダ・`RH_NONGIT_IGNORE` に書いた名前は参考扱いです。これまでは黙って飛ばしていました。
+- 点検ルート直下の git 管理外のフォルダを WARN で知らせます（`RH_WARN_NONGIT`、初期値 1）。空のフォルダ・`RH_NONGIT_IGNORE` に書いた名前は参考扱い、`.` で始まるフォルダは対象外（数えない）です。これまでは黙って飛ばしていました。
 
 ## 0.4.2 - 2026-10-23
 
