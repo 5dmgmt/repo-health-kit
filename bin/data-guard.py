@@ -98,6 +98,20 @@ def run(args: list[str], *, cwd=None, data=None, env=None, timeout=20) -> str:
     return result.stdout
 
 
+def gh_status(*args: str, timeout=20):
+    """gh api -i の最初の行（HTTP/x.x NNN）から状態コードだけを取ります。取れなければ None です。
+
+    gh は 4xx のとき終了コードが 0 でなく、run() は出力を捨てるため、ここでは終了コードを見ずに先頭行だけを読みます。
+    本文は使いません。"""
+    try:
+        result = subprocess.run(['gh', 'api', '-i', *args], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.match(rb'HTTP/[0-9.]+\s+([0-9]{3})\b', result.stdout[:64])
+    return int(match[1]) if match else None
+
+
 def git(repo: Path, *args: str, timeout=20) -> str:
     return run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
                 '-c', 'core.sshCommand=ssh', '-c', 'core.quotepath=false', '-C', str(repo), *args], timeout=timeout)
@@ -744,9 +758,17 @@ def static_group(repos: list[Repo], guard: Guard, shared: bool):
     return tables
 
 
-def github(repo: Repo, guard: Guard, logged_in: bool):
-    if os.environ.get('RH_DATA_GITHUB', '1') == '0' or not logged_in:
-        guard.emit('NOTE', 'github_unchecked', repo.label, '-', 'GitHub は無効・gh 不在・未ログインのため未検査')
+def github(repo: Repo, guard: Guard, gh_state: str):
+    # 自分で止めた点検は「未検査」と書かない（未検査の連続日数で WARN に上げるため）。
+    # gh が無い・未ログインは環境の都合なので、今までどおり「未検査」のままにします。
+    if gh_state == 'disabled':
+        guard.emit('NOTE', 'github_unchecked', repo.label, '-', 'GitHub の点検は止めています（設定 RH_DATA_GITHUB=0）')
+        return
+    if gh_state == 'missing':
+        guard.emit('NOTE', 'github_unchecked', repo.label, '-', 'gh が入っていないため GitHub の公開設定・Dependabot は未検査')
+        return
+    if gh_state != 'ok':
+        guard.emit('NOTE', 'github_unchecked', repo.label, '-', 'gh にログインしていないため GitHub の公開設定・Dependabot は未検査')
         return
     try:
         origin = git(repo.path, 'remote', 'get-url', 'origin').strip()
@@ -772,7 +794,10 @@ def github(repo: Repo, guard: Guard, logged_in: bool):
                     alerts = [item for page in alerts for item in page]
                 cached['alerts'] = dict(Counter(a['security_advisory']['severity'] for a in alerts))
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-                pass
+                # 取れなかった理由を確かめます。404 は Dependabot のアラートが無効、204 は有効、
+                # 403（権限不足）・応答なしは今までどおり未検査です。
+                if gh_status(f'repos/{remote}/vulnerability-alerts') == 404:
+                    cached['alerts_disabled'] = True
             guard.save(key, cached)
         repo.public = cached['public']
         guard.emit('INFO', 'repo_visibility', repo.label, '-', '公開リポです' if repo.public else '非公開リポです')
@@ -782,7 +807,9 @@ def github(repo: Repo, guard: Guard, logged_in: bool):
             guard.save(key, cached)
         if cached.get('became_public') == guard.today.isoformat():
             guard.finding('WARN', 'repo_public', repo, f'{repo.label}:-', '前回から公開に変わりました')
-        if cached.get('alerts') is None:
+        if cached.get('alerts_disabled'):
+            guard.emit('NOTE', 'dependabot_disabled', repo.label, '-', f'Dependabot のアラートが無効です（有効にする: gh api -X PUT repos/{remote}/vulnerability-alerts）')
+        elif cached.get('alerts') is None:
             guard.emit('NOTE', 'dependabot_unchecked', repo.label, '-', 'Dependabot は権限・応答を確認できず未検査')
         else:
             counts = cached['alerts']
@@ -1308,20 +1335,24 @@ def main():
             paths.append(root)
         else:
             paths += [p.resolve() for p in root.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith('.') and (p / '.git').exists()]
-    logged_in = False
-    if os.environ.get('RH_DATA_GITHUB', '1') != '0' and shutil.which('gh'):
+    # disabled＝設定で止めた／missing＝gh が無い／logged_out＝未ログイン／ok＝使える
+    if os.environ.get('RH_DATA_GITHUB', '1') == '0':
+        gh_state = 'disabled'
+    elif not shutil.which('gh'):
+        gh_state = 'missing'
+    else:
         try:
             run(['gh', 'auth', 'status'])
-            logged_in = True
+            gh_state = 'ok'
         except (OSError, ValueError, subprocess.SubprocessError):
-            pass
+            gh_state = 'logged_out'
     repos = []
     for path in select_clones(paths, guard):
         repo = Repo(path)
         repos.append(repo)
         try:
             discover(repo, guard)
-            github(repo, guard, logged_in)
+            github(repo, guard, gh_state)
             history(repo, guard)
             source_scan(repo, guard)
         except (OSError, ValueError, subprocess.SubprocessError):

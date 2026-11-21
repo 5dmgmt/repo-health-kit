@@ -4,7 +4,9 @@
 # shellcheck disable=SC2034
 
 # 点検する親ディレクトリです。直下の git リポジトリを点検します。複数指定できます。
-RH_ROOTS=("$HOME/Plugins")
+# 書かないときの既定は、~/Plugins と ~/projects のうち存在するものです（両方あれば両方）。
+# 場所を決めるときは、行頭の # を外して書き換えてください。
+# RH_ROOTS=("$HOME/Plugins" "$HOME/projects")
 
 # リポの侵害パッケージ・Actions と Mac のセキュリティだけを点検する場合は 1 にします。
 RH_SECURITY_ONLY=0

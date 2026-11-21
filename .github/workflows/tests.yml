@@ -1,0 +1,51 @@
+name: tests
+
+# repo-health-kit の構文確認と回帰テストです。秘密は使わず、外へ出る通信もしません。
+# （テストは偽コマンド・偽リポだけを使い、GitHub・npm・Supabase への点検は止めて流します。）
+# macOS のソフトウェア更新や launchd を扱う本体のため、実行環境は macOS です。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: シェルの構文確認（bash -n）
+        run: |
+          set -eu
+          for file in bin/*.sh install.sh uninstall.sh tests/run-tests.sh config/config.example.sh; do
+            /bin/bash -n "$file"
+          done
+
+      - name: Python の構文確認（py_compile）
+        run: |
+          set -eu
+          export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
+          python3 -m py_compile bin/*.py tests/data_guard_test.py
+
+      - name: shellcheck（入っているときだけ）
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck bin/*.sh install.sh uninstall.sh tests/run-tests.sh config/config.example.sh
+          else
+            echo "shellcheck が無いので飛ばします"
+          fi
+
+      # TMPDIR は runner の既定のままです（長い一時フォルダでも通ることの確認）。
+      - name: 回帰テスト
+        run: /bin/bash tests/run-tests.sh

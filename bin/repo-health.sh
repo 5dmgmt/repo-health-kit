@@ -107,7 +107,13 @@ RH_ENV_SUPABASE_CATALOG_KEYCHAIN_SET="${RH_SUPABASE_CATALOG_KEYCHAIN+x}"; RH_ENV
 RH_ENV_SUPABASE_ANON_PROBE_SET="${RH_SUPABASE_ANON_PROBE+x}"; RH_ENV_SUPABASE_ANON_PROBE_VALUE="${RH_SUPABASE_ANON_PROBE-}"
 RH_ENV_SITE_URLS_SET="${RH_SITE_URLS+x}"; RH_ENV_SITE_URLS_VALUE="${RH_SITE_URLS-}"
 if [ -z "$RH_ENV_ROOTS_SET" ]; then
-  RH_ROOTS=("$HOME/Plugins")
+  # 設定に RH_ROOTS が無いときの既定は、~/Plugins と ~/projects のうち存在するもの（両方あれば両方）です。
+  # どちらも無ければ ~/Plugins のままにし、「対象リポが0件です」の案内を出します。
+  RH_ROOTS=()
+  for rh_default_root in "$HOME/Plugins" "$HOME/projects"; do
+    [ ! -d "$rh_default_root" ] || RH_ROOTS[${#RH_ROOTS[@]}]="$rh_default_root"
+  done
+  [ "${#RH_ROOTS[@]}" -gt 0 ] || RH_ROOTS=("$HOME/Plugins")
 fi
 : "${RH_MAIL_METHOD:=none}"
 : "${RH_MAIL_FROM:=onboarding@resend.dev}"
@@ -462,6 +468,42 @@ streak_bump() {
 
 streak_reset() {
   rm -f "$(streak_file "$1")"
+}
+
+# dirty の指紋の保存先です。中身は shasum の 40 桁だけで、ファイル名は残しません。
+dirty_hash_file() {
+  printf '%s/%s.hash' "$STATE_DIR" "$(streak_key "dirty-$1")"
+}
+
+# 取れなかった理由を、stderr の中身を見せずに分類します（URL に鍵が入ることがあるため）。
+# 終了コード 124・142（alarm による停止）はタイムアウトです。結果は認証・ホスト不明・タイムアウト・その他。
+classify_fetch_failure() {
+  local rc="$1" err_file="$2" text
+  case "$rc" in 124|142) printf 'タイムアウト'; return;; esac
+  text="$(LC_ALL=C sed -E 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]*##g' "$err_file" 2>/dev/null | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$text" in
+    *auth*|*permission*|*credential*|*'could not read username'*) printf '認証';;
+    # 'resolve host' は 'resolve hostname' も含みます。
+    *'resolve host'*|*'name or service not known'*) printf 'ホスト不明';;
+    *timeout*|*'timed out'*) printf 'タイムアウト';;
+    *) printf 'その他';;
+  esac
+}
+
+fetch_failure_hint() {
+  case "$1" in
+    '認証') printf 'gh auth status か鍵を確認してください';;
+    'ホスト不明') printf 'ネットと remote の URL を確認してください';;
+    'タイムアウト') printf '回線を確認してください';;
+    *) printf 'remote と認証を確認してください';;
+  esac
+}
+
+# origin を fetch します。stderr は呼び出し側の一時ファイル（600）へ取り、表示はしません。
+fetch_origin() {
+  local repo="$1" err_file="$2"
+  : > "$err_file" && chmod 600 "$err_file" 2>/dev/null || true
+  run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>"$err_file"
 }
 
 # データ点検の時間切れでは、curl・psql などの子もまとめて停止します。
@@ -1119,10 +1161,32 @@ note_self_managed_gitlab_origin() {
   NOTES[${#NOTES[@]}]="${host} は自社で動かしている GitLab の可能性があります。サーバーの管理者に CVE-2026-110264 の修正版（19.5.1 など）を当てたか確かめてください"
 }
 
+# 未マージ remote ブランチの名前を「a・b・c」に整えます（名前だけ・先頭 5 本まで・残りは「ほか N 本」）。
+# 名前の `|`・改行・制御文字は除き、1 本 120 字で切ります。
+unmerged_branch_list() {
+  printf '%s\n' "$1" | python3 -I -c '
+import re
+import sys
+names = sys.stdin.buffer.read().decode("utf-8", "replace").split("\n")
+if names and names[-1] == "":
+    names.pop()
+shown = []
+for raw in names[:5]:
+    name = raw[len("refs/remotes/origin/"):] if raw.startswith("refs/remotes/origin/") else raw
+    name = re.sub(r"[|\x00-\x1f\x7f]", "", name)[:120]
+    shown.append(name or "-")
+text = "・".join(shown)
+if len(names) > 5:
+    text += "・ほか " + str(len(names) - 5) + " 本"
+sys.stdout.buffer.write(text.encode("utf-8"))
+'
+}
+
 check_repo() {
   local repo="$1" repo_name fetch branch state rebase_merge rebase_apply merge_head
   local ahead behind dirty stash fetch_days dirty_days stale_days upstream base unmerged
-  local ff_ok git_status_count origin_url
+  local ff_ok git_status_count origin_url fetch_err fetch_rc fetch_reason fetch_hint
+  local status_file dirty_hash hash_file old_hash unmerged_names
   repo_name="$(quote_name "$(basename -- "$repo")")"
   repo_state_key "$repo"
 
@@ -1141,17 +1205,25 @@ check_repo() {
     if [ "$RH_SKIP_FETCH" = "1" ]; then
       fetch="SKIP"
       add_detail "$repo_name — fetch は止めています（設定 RH_SKIP_FETCH=1）"
-    elif run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1 \
-      || { sleep 3; run_timeout 90 rh_git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune --quiet origin >/dev/null 2>&1; }; then
-      streak_reset "fetch-$REPO_STATE_KEY"
     else
-      fetch="NG"
-      fetch_days="$(streak_bump "fetch-$REPO_STATE_KEY")"
-      if [ "$fetch_days" -ge "$RH_FETCH_FAIL_DAYS" ]; then
-        add_failure "$repo_name — fetch 失敗が${fetch_days}日連続（認証または remote を確認してください）"
+      # 1 回目が失敗したら少し待って 1 度だけやり直し、最後の失敗の stderr だけを分類に使います。
+      fetch_err="$TMP_DIR/fetch-stderr.txt"
+      fetch_rc=0
+      fetch_origin "$repo" "$fetch_err" || { sleep 3; fetch_origin "$repo" "$fetch_err"; } || fetch_rc=$?
+      if [ "$fetch_rc" -eq 0 ]; then
+        streak_reset "fetch-$REPO_STATE_KEY"
       else
-        add_warning "$repo_name — fetch 失敗（${fetch_days}日目。継続すると FAIL）"
+        fetch="NG"
+        fetch_reason="$(classify_fetch_failure "$fetch_rc" "$fetch_err")"
+        fetch_hint="$(fetch_failure_hint "$fetch_reason")"
+        fetch_days="$(streak_bump "fetch-$REPO_STATE_KEY")"
+        if [ "$fetch_days" -ge "$RH_FETCH_FAIL_DAYS" ]; then
+          add_failure "$repo_name — fetch 失敗が${fetch_days}日連続（理由: ${fetch_reason}。${fetch_hint}）"
+        else
+          add_warning "$repo_name — fetch 失敗（理由: ${fetch_reason}・${fetch_days}日目。継続すると FAIL。${fetch_hint}）"
+        fi
       fi
+      rm -f "$fetch_err"
     fi
   fi
 
@@ -1181,8 +1253,27 @@ check_repo() {
   fi
   if is_uint "$ahead" && [ "$ahead" -gt 0 ]; then add_warning "$repo_name — 未push $ahead 件"; fi
 
-  # Claude Code の作業フォルダ（.claude/worktrees）の中身は、リポの dirty に数えない
-  git_status_count="$(rh_git -C "$repo" status --porcelain -- . ':(exclude).claude/worktrees' 2>/dev/null | wc -l | tr -d ' ')"
+  # Claude Code の作業フォルダ（.claude/worktrees）の中身は、リポの dirty に数えない。
+  # status の出力にはファイル名が入るため、一時ファイル（600）に取り、件数と指紋（shasum）だけを使って消します。
+  status_file="$TMP_DIR/dirty-status.out"
+  : > "$status_file" && chmod 600 "$status_file" 2>/dev/null || true
+  git_status_count=0; dirty_hash=""
+  if rh_git -C "$repo" status --porcelain=v1 -z -- . ':(exclude).claude/worktrees' > "$status_file" 2>/dev/null; then
+    git_status_count="$(python3 -I - "$status_file" <<'PY_DIRTY_COUNT'
+import sys
+entries = iter(open(sys.argv[1], "rb").read().split(b"\0")[:-1])
+count = 0
+for entry in entries:
+    count += 1
+    # 名前の変更・複製は、元の名前がもう 1 つ続きます。
+    if b"R" in entry[:2] or b"C" in entry[:2]:
+        next(entries, None)
+print(count)
+PY_DIRTY_COUNT
+)"
+    dirty_hash="$(shasum "$status_file" 2>/dev/null | cut -c1-40)"
+  fi
+  rm -f "$status_file"
   is_uint "$git_status_count" || git_status_count=0
   dirty="$git_status_count"
   stash="$(rh_git -C "$repo" stash list 2>/dev/null | wc -l | tr -d ' ')"
@@ -1210,15 +1301,28 @@ check_repo() {
     fi
   fi
 
+  # dirty の連続日数は、指紋（status の出力の shasum）が前回と同じときだけ数えます。
+  # 内容が変わっている dirty は作業が進んでいるので数え直し、同じ内容のまま続いたときだけ WARN にします。
+  hash_file="$(dirty_hash_file "$REPO_STATE_KEY")"
   if [ "$dirty" -gt 0 ]; then
+    old_hash=""
+    [ ! -f "$hash_file" ] || read -r old_hash < "$hash_file" 2>/dev/null || true
+    if [ -n "$dirty_hash" ] && [ "$old_hash" != "$dirty_hash" ]; then
+      streak_reset "dirty-$REPO_STATE_KEY"
+    fi
+    if [ -n "$dirty_hash" ]; then
+      printf '%s\n' "$dirty_hash" > "$hash_file"
+      chmod 600 "$hash_file" 2>/dev/null || true
+    fi
     dirty_days="$(streak_bump "dirty-$REPO_STATE_KEY")"
     if [ "$dirty_days" -ge "$RH_DIRTY_DAYS_WARN" ]; then
-      add_warning "$repo_name — dirty ${dirty}件が${dirty_days}日連続（コミットまたは退避を確認してください）"
+      add_warning "$repo_name — dirty ${dirty}件が同じ内容のまま${dirty_days}日（コミットまたは退避を確認してください）"
     else
-      WORKING[${#WORKING[@]}]="$repo_name — dirty ${dirty}件（${dirty_days}日目・作業中）"
+      WORKING[${#WORKING[@]}]="$repo_name — dirty ${dirty}件（作業中・${dirty_days}日目）"
     fi
   else
     streak_reset "dirty-$REPO_STATE_KEY"
+    rm -f "$hash_file"
   fi
   [ "$stash" -gt 0 ] && add_warning "$repo_name — stash $stash 件残置"
 
@@ -1227,9 +1331,15 @@ check_repo() {
     if rh_git -C "$repo" rev-parse -q --verify "$upstream" >/dev/null 2>&1; then base="$upstream"; break; fi
   done
   if [ "$fetch" != "NOREMOTE" ] && [ -n "$base" ]; then
-    unmerged="$(rh_git -C "$repo" for-each-ref --format='%(refname)' --no-merged "$base" refs/remotes/origin 2>/dev/null | LC_ALL=C grep -cv '^refs/remotes/origin/HEAD$' || true)"
-    is_uint "$unmerged" || unmerged=0
-    [ "$unmerged" -gt 0 ] && add_warning "$repo_name — 未マージ remote ブランチ $unmerged 本"
+    unmerged_names="$(rh_git -C "$repo" for-each-ref --format='%(refname)' --no-merged "$base" refs/remotes/origin 2>/dev/null | LC_ALL=C grep -v '^refs/remotes/origin/HEAD$' || true)"
+    unmerged=0
+    if [ -n "$unmerged_names" ]; then
+      unmerged="$(printf '%s\n' "$unmerged_names" | LC_ALL=C grep -c . || true)"
+      is_uint "$unmerged" || unmerged=0
+    fi
+    if [ "$unmerged" -gt 0 ]; then
+      add_warning "$repo_name — 未マージ remote ブランチ $unmerged 本（$(unmerged_branch_list "$unmerged_names")）"
+    fi
   fi
 
   if is_uint "$behind" && [ "$behind" -ge "$RH_STALE_BEHIND_THRESHOLD" ] && [ "$dirty" -gt 0 ]; then
@@ -1493,6 +1603,13 @@ check_cli_tools() {
         else
           add_warning "$tool — メジャー版が遅れています $current → ${target}（${remedy}）${wait_note}"
           [ "$tool" != "claude" ] || real_path_of "$path" >> "$TMP_DIR/cli-major-warned.claude"
+        fi
+      elif [ "$RH_AUTOFIX_CLI" = "1" ]; then
+        # RH_AUTOFIX_CLI=1 のときだけ、npm で入れた CLI のマイナー・パッチ遅れも、公開から 3 日以上の上げ先へ更新します。
+        if update_cli "$tool" "$path" "$target"; then
+          AUTOFIXED[${#AUTOFIXED[@]}]="$tool — $current → $target を自動更新"
+        else
+          add_warning "$tool — $current → ${target} の自動更新に失敗しました（${remedy}）${wait_note}"
         fi
       else
         CLI_UPDATES[${#CLI_UPDATES[@]}]="$tool — $current → $target${wait_note}"

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,13 @@ if cmd == 'git':
 elif cmd == 'gh':
     if 'status' in args:
         sys.exit(int(os.environ.get('DG_GH_AUTH_RC', '0')))
+    if any('vulnerability-alerts' in a for a in args):
+        # gh api -i は、4xx でもヘッダの先頭行（HTTP/x.x NNN）を出して終了コードが 0 になりません。
+        code = os.environ.get('DG_GH_VULN', '204')
+        if code == 'none': sys.exit(1)
+        print('HTTP/2.0 ' + code + ' Status\ncontent-type: application/json\n')
+        if code != '204': print('{"message":"fixture-body-never-print"}')
+        sys.exit(0 if code == '204' else 1)
     if any('dependabot/alerts' in a for a in args):
         if os.environ.get('DG_GH_ALERT_DENY'): sys.exit(1)
         print('[[{"security_advisory":{"severity":"high"}}]]')
@@ -725,6 +733,60 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
         out = self.scan(RH_DATA_GITHUB='1', DG_GH_ALERT_DENY='1')
         self.assert_hit(out, 'NOTE', 'dependabot_unchecked')
 
+    def api_paths(self):
+        logs = [json.loads(l) for l in (self.root / 'cli-log').read_text().splitlines()]
+        return [arg for l in logs if l[0] == 'gh' and l[1][:1] == ['api'] for arg in l[1][1:] if arg.startswith('repos/')]
+
+    def line(self, out, kind):
+        return next(l for l in out.splitlines() if l.startswith(f'DG\tNOTE\t{kind}\t'))
+
+    def test_dependabot_disabled_is_one_line_without_unchecked(self):
+        out = self.scan(RH_DATA_GITHUB='1', DG_GH_ALERT_DENY='1', DG_GH_VULN='404')
+        self.assert_hit(out, 'NOTE', 'dependabot_disabled')
+        self.assert_no_hit(out, 'dependabot_unchecked')
+        line = self.line(out, 'dependabot_disabled')
+        self.assertIn('Dependabot のアラートが無効です（有効にする: gh api -X PUT repos/example/app-a/vulnerability-alerts）', line)
+        self.assertNotIn('未検査', line)
+        self.assertEqual(len([l for l in out.splitlines() if l.split('\t')[2].startswith('dependabot')]), 1)
+        self.assertNotIn('fixture-body-never-print', out)
+
+    def test_dependabot_disabled_is_cached(self):
+        self.scan(RH_DATA_GITHUB='1', DG_GH_ALERT_DENY='1', DG_GH_VULN='404')
+        first = len(self.api_paths())
+        out = self.scan(RH_DATA_GITHUB='1', DG_GH_ALERT_DENY='1', DG_GH_VULN='404')
+        self.assert_hit(out, 'NOTE', 'dependabot_disabled')
+        self.assertEqual(len(self.api_paths()), first)
+        self.assertEqual(sum(p.endswith('/vulnerability-alerts') for p in self.api_paths()), 1)
+
+    def test_dependabot_forbidden_or_silent_stays_unchecked(self):
+        for code in ('403', 'none', '204'):
+            with self.subTest(code=code):
+                shutil.rmtree(self.state, ignore_errors=True)
+                out = self.scan(RH_DATA_GITHUB='1', DG_GH_ALERT_DENY='1', DG_GH_VULN=code)
+                self.assert_hit(out, 'NOTE', 'dependabot_unchecked')
+                self.assert_no_hit(out, 'dependabot_disabled')
+                self.assertIn('未検査', self.line(out, 'dependabot_unchecked'))
+
+    def test_dependabot_enabled_does_not_probe_status(self):
+        out = self.scan(RH_DATA_GITHUB='1', DG_GH_VULN='404')
+        self.assert_no_hit(out, 'dependabot_disabled')
+        self.assertFalse(any(p.endswith('/vulnerability-alerts') for p in self.api_paths()))
+
+    def test_github_stopped_by_setting_is_not_unchecked(self):
+        out = self.scan(RH_DATA_GITHUB='0')
+        line = self.line(out, 'github_unchecked')
+        self.assertIn('GitHub の点検は止めています（設定 RH_DATA_GITHUB=0）', line)
+        self.assertNotIn('未検査', line)
+        logs = [json.loads(l) for l in (self.root / 'cli-log').read_text().splitlines()]
+        self.assertFalse(any(l[0] == 'gh' for l in logs))
+
+    def test_github_gh_missing_is_unchecked(self):
+        (self.bin / 'gh').unlink()
+        out = self.scan(RH_DATA_GITHUB='1', PATH=str(self.bin) + ':/usr/bin:/bin')
+        line = self.line(out, 'github_unchecked')
+        self.assertIn('gh が入っていない', line)
+        self.assertIn('未検査', line)
+
     def test_allow_expiry(self):
         self.sql(self.open_sql())
         (self.root / 'allow.tsv').write_text('policy_open\tpublic.app_a_profiles:app_a_access\t\t2026-11-20\tfixture\n')
@@ -990,7 +1052,11 @@ const lesson = `process.env.APP_REFRESH_TOKEN`;
         self.assertEqual(list(self.state.iterdir()), [])
 
     def test_github_logged_out(self):
-        self.assert_hit(self.scan(RH_DATA_GITHUB='1', DG_GH_AUTH_RC='1'), 'NOTE', 'github_unchecked')
+        out = self.scan(RH_DATA_GITHUB='1', DG_GH_AUTH_RC='1')
+        self.assert_hit(out, 'NOTE', 'github_unchecked')
+        line = self.line(out, 'github_unchecked')
+        self.assertIn('gh にログインしていない', line)
+        self.assertIn('未検査', line)
         logs = [json.loads(l) for l in (self.root / 'cli-log').read_text().splitlines()]
         self.assertFalse(any(l[0]=='gh' and l[1][0]=='api' for l in logs))
 

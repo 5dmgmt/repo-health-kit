@@ -16,7 +16,7 @@ cd repo-health-kit
 ./install.sh
 ```
 
-本体は `~/Library/Application Support/repo-health-kit/`、設定は `~/.config/repo-health-kit/config.sh` に入ります。設定がすでにある場合は引き継ぎ、npm と clone の場所だけを記録し直します。点検対象の初期値は `~/Plugins` の直下です。
+本体は `~/Library/Application Support/repo-health-kit/`、設定は `~/.config/repo-health-kit/config.sh` に入ります。設定がすでにある場合は引き継ぎ、npm と clone の場所だけを記録し直します。点検対象は、設定に `RH_ROOTS` を書かないときは、`~/Plugins` と `~/projects` のうち存在するものの直下です（両方あれば両方）。どちらも無ければ `~/Plugins` のままで、「対象リポが0件です」と知らせます。
 
 必要なコマンドは `bash`、`git`、`python3`、`curl`、`perl` です。`node` または `npm` がない場合、依存脆弱性は「異常なし」ではなく「未検査」として報告されます。Homebrew と composer は、使っている場合に点検の対象になります。Windows には対応していません。
 
@@ -135,8 +135,12 @@ Supabase の service_role JWT（anon は対象外）、`sb_secret_`、Resend、A
 - **証明書の点検**: 点検のたびに、確認用に公開されているテスト先（`dv-g3b-emudhra.we-have-a-problem.com` など2件。出典は [emudhra.we-have-a-problem.com](https://emudhra.we-have-a-problem.com/)）へ、手元の道具ごとに1回ずつ接続します。初期設定では、多くて10回（道具5つ × テスト先2件）です。応答があったかどうかだけを見て、ページの中身は読みません。止める場合は `RH_TLS_PROBE=0` にします。
 - **新しい版の確認**: `raw.githubusercontent.com` から、版番号だけを書いたファイル `VERSION` を読みます。止める場合は `RH_KIT_UPDATE_CHECK=0` にします。
 - **入っているソフトの更新確認**: Homebrew の公開目録 `https://formulae.brew.sh/api/cask.json` を読みます。目録は手元に保存し、20時間たつまでは読み直しません。読めないときは、7日以内に保存したものを使います。npm の道具は、版ごとの公開日時を npm の公開サーバーから読みます。App Store は `mas` が Apple へ問い合わせます。
-- **そのほか**: Homebrew の更新情報（`brew update`）、macOS のアップデート確認（`softwareupdate -l`）、`composer audit` は、それぞれの配布元へ接続します。
-- 点検結果を送る先は、設定したメールの宛先（Resend 経由）だけです。
+- **各リポジトリの点検**: 各リポの `origin` へ `git fetch` します（`RH_SKIP_FETCH=1` で止めます）。依存の脆弱性の点検（`npm audit`・`pnpm audit`・`yarn npm audit`・`bun audit`・`composer audit`）は、依存パッケージの名前と版を、それぞれの公開サーバーへ問い合わせます（`RH_SKIP_AUDIT=1` で止めます）。
+- **CLI の最新版の確認**: `npm view` で npm の公開サーバーへ、Node.js は `nodejs.org` の `dist/index.json` へ、`gh` と `op` は GitHub の公開 API へ問い合わせます（`RH_SKIP_CLI=1` で止めます）。`RH_AUTOFIX_CLI=1` のときだけ、更新のために `npm install -g` で npm の公開サーバーから取得します。
+- **GitHub の公開設定・Dependabot**: `gh` が入っていてログイン済みのときだけ、`gh api` で GitHub へ問い合わせます（24時間使い回します。`RH_DATA_GITHUB=0` で止めます）。
+- **Homebrew と macOS**: Homebrew の更新情報（`brew update`・`brew outdated`）と、自動更新を有効にしたときの `brew upgrade`、macOS のアップデート確認（`softwareupdate -l`）は、それぞれの配布元へ接続します。
+- **本番への読み取り（既定オフ）**: `RH_SUPABASE_CATALOG=1`（Supabase の目録へ `psql`）、`RH_SUPABASE_ANON_PROBE=1`（公開鍵での GET）、`RH_SITE_URLS`（本番サイトの配信物）は、設定した場合だけ、設定した接続先へ読み取りで接続します。[詳しい手順](docs/data-guard.md)を確認してから設定してください。
+- 点検結果を送る先は、設定したメールの宛先だけです。メールは Resend の `api.resend.com` を経由します。
 
 Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=1` にします。このときは、レポートの「参考」に「止めています（設定 RH_SKIP_SECURITY=1）」と残ります。
 
@@ -155,8 +159,11 @@ Mac のセキュリティ点検を丸ごと止める場合は `RH_SKIP_SECURITY=
 `RH_MAIL_METHOD=none` では WARN も音なしの画面通知に出ます。`RH_NO_DESKTOP=1` なら画面通知を止められます。
 
 - `FAIL（赤）` は今日中に確認する目安です。例: detached HEAD、作業途中の merge、平文シークレット、本番依存の critical/high（npm・composer）、侵害パッケージ、侵害された GitHub Actions、サーバーとして動いている古い PHP・GitLab・Plex Media Server です。
-- `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
+- `WARN（黄）` は今週中に確認する目安です。例: 未push、stash、同じ内容のまま3日以上続く dirty、監査不能、CLI のメジャー版遅れ、Mac のセキュリティ部品の更新待ち、古い PHP（サーバーとして動いていないもの）、古い Node.js・Java・macOS・アプリ・Claude Code、失効済みの証明書を信頼している道具、macOS のアップデート待ち、kit の新しい版です。
 - 「作業中」「同期待ち」は赤黄の対象外です。単発の dirty を異常とは決めつけません。
+- dirty は、変更のあるファイルの一覧（`git status` の出力）の指紋（`shasum` の値だけ）が前回と同じときだけ、連続日数を数えます。毎日ファイルが変わる作業中の dirty は、日数を数え直して「dirty N件（作業中・D日目）」と参考に載せるだけです。同じ内容の dirty が `RH_DIRTY_DAYS_WARN`（初期値3）日続いたときだけ、「dirty N件が同じ内容のまま D日（コミットまたは退避を確認してください）」と WARN にします。指紋はファイル名を含まず、状態の保存先に権限600で置きます。
+- fetch に失敗したときは、最後の失敗の理由を「認証」「ホスト不明」「タイムアウト」「その他」に分けて知らせ、次の一手を添えます（認証は `gh auth status` か鍵、ホスト不明はネットと remote の URL、タイムアウトは回線）。分類にだけ使い、git のエラー文そのものは表示しません（URL に鍵が入ることがあるためです）。1日目は WARN、`RH_FETCH_FAIL_DAYS`（初期値2）日続くと FAIL です。
+- 未マージの remote ブランチは、本数に加えて名前を載せます（先頭5本まで、超えた分は「ほか N 本」）。名前から `|` と制御文字は除きます。
 - 「未検査」は異常なしを意味しません。npm、Homebrew、ネットワークの状態を確認して再実行してください。
 - 「参考」は、ローカルのレポート（`repo-health-latest.md`）に載り、メールの要対応には数えません。「データの守り」の参考はメールにも載ります。Apple 標準の curl と python3 についての知らせは、ここに出ます（[よくある質問](#apple-の-curl-と-python3-が失効済みの証明書をまだ信頼していると参考に出続けます)）。入っているソフトの更新も、ここに `ソフト更新: …` の形で並びます。同じ更新が14日以上残ると、WARN に上がります。
 
@@ -196,6 +203,7 @@ Claude Code に相談するときは、値やシークレットを貼らず、�
 `~/.config/repo-health-kit/config.sh` を編集します。複数の親ディレクトリや、1日複数回の時刻も指定できます。
 
 ```bash
+# RH_ROOTS を書かないときは ~/Plugins と ~/projects のうち存在するもの（両方あれば両方）
 RH_ROOTS=("$HOME/Plugins" "$HOME/仕事のリポジトリ")
 RH_SCHEDULE="09:20 17:30"
 RH_WARN_NONGIT=1
@@ -204,7 +212,7 @@ RH_AUTOFIX_PULL=1
 RH_AUTOFIX_CLI=0
 ```
 
-CLI の自動更新は初期状態で無効です。有効にしたときも、npm で入れた CLI だけを、公開から3日以上たった版へ更新します。正式な latest 以下で、現在も配布され、非推奨になっていない版を選びます。取得できなければ未検査とします。npm 以外で入れた CLI は自動更新せず、現在版・上げ先・入れた方法に応じた直し方を WARN で案内します。Claude Code の公開日は npm の情報で確認します。サポート中の Node.js LTS 系列から次の LTS への案内は参考に出します。
+CLI の自動更新は初期状態で無効です（`RH_AUTOFIX_CLI=0` では、マイナー・パッチの遅れは参考に並べるだけ、メジャーの遅れは WARN で案内します）。`RH_AUTOFIX_CLI=1` にしたときだけ、npm で入れた CLI を、メジャーに加えてマイナー・パッチの遅れも、公開から3日以上たった版へ更新します。正式な latest 以下で、現在も配布され、非推奨になっていない版を選びます。更新に失敗したときは、「… の自動更新に失敗しました（実行するコマンド）」と WARN で知らせます。取得できなければ未検査とします。npm 以外（Homebrew・ネイティブ）で入れた CLI は自動更新せず、現在版・上げ先・入れた方法に応じた直し方を WARN で案内します。Claude Code の公開日は npm の情報で確認します。サポート中の Node.js LTS 系列から次の LTS への案内は参考に出します。
 
 Homebrew の formula と cask の自動更新には 3 日待ちがありません。
 
@@ -320,6 +328,12 @@ Command Line Tools に入っている Python は 3.9 です。修正版の pip 2
 
 設定ファイルが現在の利用者以外の所有物である場合や、group/other から書き込み可能な場合は読み込みません。シークレットの値はレポートへ出さず、検出したファイルのパスだけを示します。
 
+## テストと CI
+
+回帰テストは偽コマンド・偽リポだけを使い、外へ出る通信をしません（GitHub・npm・Supabase などの点検は止めて流します）。clone したフォルダで `/bin/bash tests/run-tests.sh` を実行します。作業用の一時フォルダは、`TMPDIR` が長いときも同じ結果になるよう、短い場所に作ります。
+
+GitHub Actions の `.github/workflows/tests.yml` が、main への push と pull request のたびに、macOS で構文確認（`bash -n`・`py_compile`・入っていれば `shellcheck`）と回帰テストを動かします。秘密は使わず、権限は読み取りだけで、使うアクションはタグではなくコミットの SHA で固定しています。
+
 ## License
 
 MIT License です。詳細は [LICENSE](LICENSE) をご覧ください。
@@ -337,7 +351,7 @@ MIT License です。詳細は [LICENSE](LICENSE) をご覧ください。
 - git 履歴の鍵ファイル名（初回は全履歴、以後は追加分、1リポ20秒上限）
 - cron / captcha の未設定時の素通り、Map の連射制限、新しく増えた認証不明の API 入口
 - テナント列と方針の using の照合
-- gh がありログイン済みの場合の GitHub 公開設定・Dependabot（24時間使い回し。`RH_DATA_GITHUB=0` で通信を停止）
+- gh がありログイン済みの場合の GitHub 公開設定・Dependabot（24時間使い回し。`RH_DATA_GITHUB=0` で通信を停止）。止めたときは「GitHub の点検は止めています（設定 RH_DATA_GITHUB=0）」と書き、未検査の WARN には上げません。`gh` が入っていない・ログインしていないときは、環境の都合なので「未検査」のままです（3日続くと WARN）。Dependabot のアラートが無効なリポは、「Dependabot のアラートが無効です（有効にする: gh api -X PUT repos/…/vulnerability-alerts）」と参考に1行だけ出し、未検査には数えません（結果は24時間使い回します）。権限が足りない・応答がないときは、今までどおり「未検査」です
 
 本番への読み取りは既定でオフです。`RH_SUPABASE_CATALOG=1` と専用接続の設定で目録、`RH_SUPABASE_ANON_PROBE=1` で公開鍵の GET、`RH_SITE_URLS` で本番サイトの外形を点検できます。[詳しい手順](docs/data-guard.md)と[監査役割の作り方](docs/supabase-audit-role.md)を確認してから設定してください。
 

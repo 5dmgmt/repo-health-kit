@@ -11,7 +11,16 @@ TEST_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
 PROJECT_DIR="$(unset CDPATH; cd -- "$TEST_DIR/.." && pwd)"
 HEALTH="$PROJECT_DIR/bin/repo-health.sh"
 TEST_BASH="${RH_TEST_BASH:-/bin/bash}"
-TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/repo-health-tests.XXXXXX")" || exit 1
+# 作業フォルダは短い場所に作ります。本体は表示する名前（パス）を 120 字で切るため、TMPDIR が長いと、
+# 「パスの終わりまで見える」ことに頼るテストの期待が外れます。どの TMPDIR でも同じ結果にするため、
+# TMPDIR が短ければそれを使い、長いときは /tmp の下に作ります（/tmp に作れなければ TMPDIR の下に作ります）。
+test_base="${TMPDIR:-/tmp}"
+test_base="${test_base%/}"
+TEST_TMP=""
+if [ "${#test_base}" -gt 30 ]; then
+  TEST_TMP="$(mktemp -d /tmp/rhk.XXXXXX 2>/dev/null)" || TEST_TMP=""
+fi
+[ -n "$TEST_TMP" ] || TEST_TMP="$(mktemp -d "$test_base/rhk.XXXXXX")" || exit 1
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
 total=0
@@ -474,13 +483,13 @@ mkdir -p "$case_dir"
 make_remote_repo "$case_dir" dirtyrepo
 printf 'working\n' >> "$REPO_PATH/README.md"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'dirty 1日目は作業中' "$case_dir/output.txt" 'dirty 1件（1日目・作業中）'
+assert_contains 'dirty 1日目は作業中' "$case_dir/output.txt" 'dirty 1件（作業中・1日目）'
 assert_not_contains 'dirty 1日目は WARN にしない' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty'
 state_file="$(find "$case_dir/state" -name 'dirty-*.state' -print -quit)"
 yesterday="$(date -v-1d '+%Y-%m-%d' 2>/dev/null || date -d 'yesterday' '+%Y-%m-%d')"
 printf '%s 2\n' "$yesterday" > "$state_file"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains 'dirty 3日目は WARN' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty 1件が3日連続'
+assert_contains 'dirty 3日目は WARN' "$case_dir/output.txt" 'WARN  「dirtyrepo」 .*dirty 1件が同じ内容のまま3日（コミットまたは退避を確認してください）'
 
 # 0.7.1: Claude Code の作業フォルダ（.claude/worktrees）だけが未追跡のリポは、dirty に数えない
 case_dir="$TEST_TMP/dirty-worktrees"
@@ -493,7 +502,7 @@ assert_contains '.claude/worktrees だけが未追跡のリポは dirty 0 件' "
 assert_not_contains '.claude/worktrees だけが未追跡のリポは作業中にも出さない' "$case_dir/output.txt" '「wtrepo」 — dirty [0-9]+件'
 printf 'real\n' > "$REPO_PATH/real.txt"
 run_health "$case_dir" "$case_dir/root with space"
-assert_contains '作業フォルダの外の未追跡ファイルは今までどおり dirty に数える' "$case_dir/output.txt" 'dirty 1件（1日目・作業中）'
+assert_contains '作業フォルダの外の未追跡ファイルは今までどおり dirty に数える' "$case_dir/output.txt" 'dirty 1件（作業中・1日目）'
 
 case_dir="$TEST_TMP/denylist"
 mkdir -p "$case_dir"
@@ -3457,6 +3466,299 @@ printf 'create table app_a_profiles(id uuid);\n' > "$REPO_PATH/supabase/migratio
 run_k1_case "$case_dir" "$case_dir/root with space" "$fake_bin" RH_SECURITY_ONLY=1
 assert_contains '実際のスキャナによる静的点検を本体の要対応へ載せる' "$case_dir/output.txt" 'WARN .*rls_off: migration の記述上は RLS'
 assert_not_contains '実際のスキャナが最後まで動く' "$case_dir/output.txt" 'データの守りの点検が最後まで動きませんでした'
+
+# ---- 0.8.0: dirty の指紋・fetch の理由・未マージ名・CLI 自動更新・止めた点検の書き方・既定のフォルダ・CI ----
+
+file_mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+
+# §1 dirty の指紋: 同じ内容のまま続く dirty だけを WARN にする
+case_dir="$TEST_TMP/dirty-fingerprint-same"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" fprepo
+printf 'x\n' > "$REPO_PATH/private-file-name-9d2c.txt"
+RH_TODAY=2026-11-01 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '同じ dirty の1日目は作業中' "$case_dir/output.txt" '「fprepo」 — dirty 1件（作業中・1日目）'
+RH_TODAY=2026-11-02 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '同じ dirty の2日目は作業中' "$case_dir/output.txt" '「fprepo」 — dirty 1件（作業中・2日目）'
+assert_not_contains '同じ dirty の2日目は WARN にしない' "$case_dir/output.txt" 'WARN  「fprepo」 .*dirty'
+RH_TODAY=2026-11-03 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '同じ内容の dirty が3日続けば WARN' "$case_dir/output.txt" 'WARN  「fprepo」 — dirty 1件が同じ内容のまま3日（コミットまたは退避を確認してください）'
+dirty_hash_path="$(find "$case_dir/state" -name 'dirty-*.hash' -print -quit)"
+if [ -n "$dirty_hash_path" ] && LC_ALL=C grep -qxE '[0-9a-f]{40}' "$dirty_hash_path" && [ "$(file_mode_of "$dirty_hash_path")" = 600 ]; then
+  pass 'dirty の指紋は 40 桁の値だけを権限 600 で保存する'
+else
+  fail 'dirty の指紋は 40 桁の値だけを権限 600 で保存する'
+fi
+if [ -n "$dirty_hash_path" ] && ! LC_ALL=C grep -rqF 'private-file-name-9d2c' "$case_dir/state" "$case_dir/log" "$case_dir/output.txt"; then
+  pass 'dirty の指紋・状態・ログ・出力にファイル名を残さない'
+else
+  fail 'dirty の指紋・状態・ログ・出力にファイル名を残さない'
+fi
+
+case_dir="$TEST_TMP/dirty-fingerprint-changing"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" moverepo
+printf 'a\n' > "$REPO_PATH/a.txt"
+RH_TODAY=2026-11-01 run_health "$case_dir" "$case_dir/root with space"
+printf 'b\n' > "$REPO_PATH/b.txt"
+RH_TODAY=2026-11-02 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '内容が変わった dirty は日数を数え直す' "$case_dir/output.txt" '「moverepo」 — dirty 2件（作業中・1日目）'
+printf 'c\n' > "$REPO_PATH/c.txt"
+RH_TODAY=2026-11-03 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '毎日ファイルが変わる dirty は3日目も作業中' "$case_dir/output.txt" '「moverepo」 — dirty 3件（作業中・1日目）'
+assert_not_contains '毎日ファイルが変わる dirty は WARN にしない' "$case_dir/output.txt" 'WARN  「moverepo」 .*dirty'
+RH_TODAY=2026-11-04 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '変化が止まれば同じ内容として数え直した日数が進む' "$case_dir/output.txt" '「moverepo」 — dirty 3件（作業中・2日目）'
+rm -f "$REPO_PATH/a.txt" "$REPO_PATH/b.txt" "$REPO_PATH/c.txt"
+RH_TODAY=2026-11-05 run_health "$case_dir" "$case_dir/root with space"
+assert_contains '消えて clean に戻れば dirty 0 件' "$case_dir/output.txt" '「moverepo」 — fetch=SKIP .* dirty=0 '
+if [ -z "$(find "$case_dir/state" -name 'dirty-*' -print -quit)" ]; then pass 'clean に戻ったら dirty の日数と指紋を消す'; else fail 'clean に戻ったら dirty の日数と指紋を消す'; fi
+
+case_dir="$TEST_TMP/dirty-rename-count"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" renrepo
+git -C "$REPO_PATH" mv README.md RENAMED.md
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '名前の変更は 1 件として数える' "$case_dir/output.txt" '「renrepo」 — fetch=SKIP .* dirty=1 stash=0'
+
+# §2 fetch の失敗の理由: stderr は分類だけに使い、中身（URL）を出さない
+make_fake_fetch_git() {
+  local fake_bin="$1"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<'SH'
+#!/bin/bash
+for arg in "$@"; do
+  if [ "$arg" = fetch ]; then
+    printf 'fetch\n' >> "${FAKE_GIT_LOG:?}"
+    if [ -n "${FAKE_GIT_PASS_AFTER-}" ] && [ "$(wc -l < "$FAKE_GIT_LOG")" -gt "$FAKE_GIT_PASS_AFTER" ]; then exec "${REAL_GIT:?}" "$@"; fi
+    printf '%s\n' "${FAKE_GIT_STDERR-}" >&2
+    exit "${FAKE_GIT_RC:-128}"
+  fi
+done
+exec "${REAL_GIT:?}" "$@"
+SH
+  printf '%s\n' '#!/bin/bash' 'exit 0' > "$fake_bin/sleep"
+  chmod +x "$fake_bin/git" "$fake_bin/sleep"
+}
+
+run_fetch_health() {
+  local case_dir="$1" root="$2" fake_bin="$3" output
+  shift 3
+  output="$case_dir/output.txt"
+  mkdir -p "$case_dir/home"
+  env PATH="$fake_bin:$PATH" REAL_GIT="$(command -v git)" FAKE_GIT_LOG="$case_dir/fetch.log" \
+    HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/no-config.sh" RH_ROOTS="$root" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=0 RH_SKIP_SECURITY=1 \
+    RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    "$@" "$TEST_BASH" "$HEALTH" > "$output" 2>&1 || true
+}
+
+fake_url='https://FAKE-URL-SECRET-7f3a@git.example.invalid/org/repo.git'
+for fetch_case in auth host timeout exitcode other; do
+  case_dir="$TEST_TMP/fetch-reason-$fetch_case"
+  mkdir -p "$case_dir"
+  make_remote_repo "$case_dir" fetchrepo
+  fake_bin="$case_dir/fake-bin"
+  make_fake_fetch_git "$fake_bin"
+  case "$fetch_case" in
+    auth) fetch_err="fatal: could not read Username for '$fake_url': terminal prompts disabled"; fetch_rc=128; reason='認証'; hint='gh auth status か鍵を確認してください';;
+    host) fetch_err="fatal: unable to access '$fake_url/': Could not resolve host: git.example.invalid"; fetch_rc=128; reason='ホスト不明'; hint='ネットと remote の URL を確認してください';;
+    timeout) fetch_err="fatal: unable to access '$fake_url/': Operation timed out after 60001 milliseconds"; fetch_rc=128; reason='タイムアウト'; hint='回線を確認してください';;
+    exitcode) fetch_err=''; fetch_rc=142; reason='タイムアウト'; hint='回線を確認してください';;
+    other) fetch_err="fatal: repository '$fake_url/' not found"; fetch_rc=128; reason='その他'; hint='remote と認証を確認してください';;
+  esac
+  RH_TODAY=2026-11-01 run_fetch_health "$case_dir" "$case_dir/root with space" "$fake_bin" FAKE_GIT_STDERR="$fetch_err" FAKE_GIT_RC="$fetch_rc"
+  assert_contains "$fetch_case: fetch 失敗の1日目は理由と次の一手を WARN に出す" "$case_dir/output.txt" "WARN  「fetchrepo」 — fetch 失敗（理由: ${reason}・1日目。継続すると FAIL。${hint}）"
+  assert_count "$fetch_case: fetch は 1 度だけやり直す" "$case_dir/fetch.log" '^fetch$' 2
+  RH_TODAY=2026-11-02 run_fetch_health "$case_dir" "$case_dir/root with space" "$fake_bin" FAKE_GIT_STDERR="$fetch_err" FAKE_GIT_RC="$fetch_rc"
+  assert_contains "$fetch_case: 2日連続は理由と次の一手を FAIL に出す" "$case_dir/output.txt" "FAIL  「fetchrepo」 — fetch 失敗が2日連続（理由: ${reason}。${hint}）"
+  assert_not_contains "$fetch_case: stderr の中身（URL）を出さない" "$case_dir/output.txt" 'FAKE-URL-SECRET-7f3a|git\.example\.invalid'
+  if ! LC_ALL=C grep -rqF 'FAKE-URL-SECRET-7f3a' "$case_dir/log" "$case_dir/state"; then pass "$fetch_case: stderr の中身をログ・状態に残さない"; else fail "$fetch_case: stderr の中身をログ・状態に残さない"; fi
+done
+
+case_dir="$TEST_TMP/fetch-retry-ok"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" retryrepo
+fake_bin="$case_dir/fake-bin"
+make_fake_fetch_git "$fake_bin"
+run_fetch_health "$case_dir" "$case_dir/root with space" "$fake_bin" FAKE_GIT_STDERR='fatal: Could not resolve host: x' FAKE_GIT_PASS_AFTER=1
+assert_contains '1 回目の失敗は 2 回目で成功すれば fetch=OK' "$case_dir/output.txt" '「retryrepo」 — fetch=OK '
+assert_not_contains '1 回目の失敗は 2 回目で成功すれば知らせない' "$case_dir/output.txt" 'fetch 失敗'
+assert_count '失敗のあとの再試行は 1 度だけ' "$case_dir/fetch.log" '^fetch$' 2
+case_dir="$TEST_TMP/fetch-plain-ok"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" plainrepo
+run_fetch_health "$case_dir" "$case_dir/root with space" "$case_dir/no-fake-bin"
+assert_contains '偽コマンドなしの fetch は成功する' "$case_dir/output.txt" '「plainrepo」 — fetch=OK '
+
+# §3 未マージ remote ブランチは名前だけ（先頭 5 本・名前の `|` は除く）
+push_remote_branches() {
+  local case_dir="$1" name
+  shift
+  git clone -q "$case_dir/origin.git" "$case_dir/writer" 2>/dev/null
+  git -C "$case_dir/writer" config user.name tester
+  git -C "$case_dir/writer" config user.email tester@example.invalid
+  for name in "$@"; do
+    git -C "$case_dir/writer" checkout -q -b "$name"
+    printf '%s\n' "$name" > "$case_dir/writer/branch-file.txt"
+    git -C "$case_dir/writer" add branch-file.txt
+    git -C "$case_dir/writer" commit -q -m "test: $name"
+    git -C "$case_dir/writer" push -q origin "$name"
+    git -C "$case_dir/writer" checkout -q -
+  done
+  git -C "$REPO_PATH" fetch -q origin
+}
+case_dir="$TEST_TMP/unmerged-two"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" mergetwo
+push_remote_branches "$case_dir" feature/a fix/b
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '未マージ remote ブランチは名前を出す（2 本）' "$case_dir/output.txt" 'WARN  「mergetwo」 — 未マージ remote ブランチ 2 本（feature/a・fix/b）'
+case_dir="$TEST_TMP/unmerged-seven"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" mergeseven
+push_remote_branches "$case_dir" wip/c1 wip/c2 wip/c3 wip/c4 wip/c5 wip/c6 wip/c7
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '未マージ remote ブランチは先頭 5 本と「ほか N 本」（7 本）' "$case_dir/output.txt" 'WARN  「mergeseven」 — 未マージ remote ブランチ 7 本（wip/c1・wip/c2・wip/c3・wip/c4・wip/c5・ほか 2 本）'
+assert_not_contains '6 本目以降の名前は出さない' "$case_dir/output.txt" 'wip/c6'
+case_dir="$TEST_TMP/unmerged-pipe"
+mkdir -p "$case_dir"
+make_remote_repo "$case_dir" mergepipe
+push_remote_branches "$case_dir" 'wip|pipe'
+run_health "$case_dir" "$case_dir/root with space"
+assert_contains '名前の `|` は除いて出す' "$case_dir/output.txt" 'WARN  「mergepipe」 — 未マージ remote ブランチ 1 本（wippipe）'
+assert_not_contains '名前の `|` を表示に残さない' "$case_dir/output.txt" 'wip\|pipe'
+
+# §4 RH_AUTOFIX_CLI=1 のときだけ、npm で入れた CLI のマイナー・パッチ遅れも自動更新する
+make_npm_installed_claude() {
+  local case_dir="$1" fake_bin="$2"
+  make_fake_brew "$fake_bin"
+  make_fake_cli_set "$fake_bin"
+  make_fake_claude "$case_dir/lib/node_modules/@anthropic-ai/claude-code/bin/claude"
+  ln -s "$case_dir/lib/node_modules/@anthropic-ai/claude-code/bin/claude" "$fake_bin/claude"
+  mv "$fake_bin/npm-fixture" "$fake_bin/npm-fixture-orig"
+  cat > "$fake_bin/npm-fixture" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = install ]; then printf '%s\n' "$*" >> "${FAKE_NPM_INSTALL_LOG:?}"; exit "${FAKE_NPM_INSTALL_RC:-0}"; fi
+exec "$0-orig" "$@"
+SH
+  chmod +x "$fake_bin/npm-fixture"
+}
+case_dir="$TEST_TMP/cli-minor-autofix"
+fake_bin="$case_dir/fake-bin"
+make_npm_installed_claude "$case_dir" "$fake_bin"
+: > "$case_dir/install.log"
+run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log"
+assert_contains 'RH_AUTOFIX_CLI=1 は npm 導入の CLI のマイナー遅れを自動更新する' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300 を自動更新'
+assert_contains '自動更新は公開から 3 日以上の上げ先を npm install -g する' "$case_dir/install.log" '^install -g @anthropic-ai/claude-code@2\.1\.300$'
+assert_not_contains '自動更新できた CLI は更新あり一覧・WARN に出さない' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250|CLI 更新あり: [1-9]|^- claude — 2\.1\.250 → 2\.1\.300$'
+: > "$case_dir/install.log"
+run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=0 FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log"
+assert_contains 'RH_AUTOFIX_CLI=0 のマイナー遅れは並べるだけ' "$case_dir/output.txt" '^- claude — 2\.1\.250 → 2\.1\.300$'
+assert_not_contains 'RH_AUTOFIX_CLI=0 は自動更新しない' "$case_dir/output.txt" 'claude .*を自動更新'
+assert_count 'RH_AUTOFIX_CLI=0 は npm install を呼ばない' "$case_dir/install.log" 'install' 0
+run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log" FAKE_NPM_INSTALL_RC=1
+assert_contains '自動更新に失敗したら WARN にコマンドを出す' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250 → 2\.1\.300 の自動更新に失敗しました（npm install -g @anthropic-ai/claude-code@2\.1\.300）'
+assert_not_contains '自動更新に失敗した CLI を「自動更新」と書かない' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300 を自動更新'
+
+# §5 止めた GitHub の点検は「止めています」、gh 不在・未ログインは「未検査」のまま（3 日目の WARN は後者だけ）
+case_dir="$TEST_TMP/github-stopped-vs-missing"
+mkdir -p "$case_dir/fake-bin" "$case_dir/home"
+make_remote_repo "$case_dir" ghrepo
+cat > "$case_dir/scanner-no-gh.py" <<'PY_NOGH'
+import os
+import runpy
+# gh を探せない環境の PATH にして、本物のスキャナを動かします。
+os.environ['PATH'] = os.environ['K5_SCANNER_PATH']
+runpy.run_path(os.environ['K5_REAL_SCANNER'], run_name='__main__')
+PY_NOGH
+for day in 2026-11-01 2026-11-02 2026-11-03; do
+  run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/fake-bin" RH_SECURITY_ONLY=1 RH_TODAY="$day" RH_DATA_GITHUB=0 \
+    RH_DATA_GUARD_SCANNER="$case_dir/scanner-no-gh.py" K5_REAL_SCANNER="$PROJECT_DIR/bin/data-guard.py" K5_SCANNER_PATH=/usr/bin:/bin
+done
+assert_contains 'RH_DATA_GITHUB=0 は「止めています」と書く' "$case_dir/output.txt" 'GitHub の点検は止めています（設定 RH_DATA_GITHUB=0）'
+assert_not_contains 'RH_DATA_GITHUB=0 は 3 日続いても未検査の WARN に上げない' "$case_dir/output.txt" 'WARN .*GitHub.*未検査'
+assert_not_contains 'RH_DATA_GITHUB=0 の注記に「未検査」を入れない' "$case_dir/output.txt" 'RH_DATA_GITHUB=0.*未検査'
+rm -rf "$case_dir/state"
+for day in 2026-11-01 2026-11-02 2026-11-03; do
+  run_k1_case "$case_dir" "$case_dir/root with space" "$case_dir/fake-bin" RH_SECURITY_ONLY=1 RH_TODAY="$day" RH_DATA_GITHUB=1 \
+    RH_DATA_GUARD_SCANNER="$case_dir/scanner-no-gh.py" K5_REAL_SCANNER="$PROJECT_DIR/bin/data-guard.py" K5_SCANNER_PATH=/usr/bin:/bin
+done
+assert_contains 'gh が無いときは「未検査」と書く' "$case_dir/output.txt" 'gh が入っていないため GitHub の公開設定・Dependabot は未検査'
+assert_contains 'gh が無い状態が 3 日続けば WARN に上げる' "$case_dir/output.txt" 'WARN .*gh が入っていないため GitHub の公開設定・Dependabot は未検査（未検査が続いて3日目'
+
+# §7 既定の点検フォルダ: 設定に RH_ROOTS が無いときは ~/Plugins と ~/projects のうち存在するもの
+run_default_roots() {
+  local case_dir="$1"
+  shift
+  mkdir -p "$case_dir/home"
+  env -u RH_ROOTS HOME="$case_dir/home" RH_CONFIG_FILE="$case_dir/config.sh" \
+    RH_LOG_DIR="$case_dir/log" RH_STATE_DIR="$case_dir/state" \
+    RH_SKIP_AUDIT=1 RH_SKIP_CLI=1 RH_SKIP_FETCH=1 RH_SKIP_SECURITY=1 \
+    RH_AUTOFIX_PULL=0 RH_MAIL_METHOD=none RH_NOMAIL=1 RH_NO_DESKTOP=1 \
+    "$@" "$TEST_BASH" "$HEALTH" > "$case_dir/output.txt" 2>&1 || true
+}
+case_dir="$TEST_TMP/roots-projects-only"
+mkdir -p "$case_dir/home/projects"
+make_remote_repo "$case_dir" seed
+git clone -q "$case_dir/origin.git" "$case_dir/home/projects/projrepo" 2>/dev/null
+run_default_roots "$case_dir"
+assert_contains 'ホームの projects だけがあれば、そこを点検する' "$case_dir/output.txt" '「projrepo」 — fetch=SKIP'
+assert_not_contains 'ホームの projects だけがあれば 0 件の FAIL を出さない' "$case_dir/output.txt" '対象リポが0件'
+case_dir="$TEST_TMP/roots-both"
+mkdir -p "$case_dir/home/projects" "$case_dir/home/Plugins"
+make_remote_repo "$case_dir" seed
+git clone -q "$case_dir/origin.git" "$case_dir/home/projects/projrepo" 2>/dev/null
+git clone -q "$case_dir/origin.git" "$case_dir/home/Plugins/plugrepo" 2>/dev/null
+run_default_roots "$case_dir"
+assert_contains '両方あればホームの Plugins を点検する' "$case_dir/output.txt" '「plugrepo」 — fetch=SKIP'
+assert_contains '両方あればホームの projects も点検する' "$case_dir/output.txt" '「projrepo」 — fetch=SKIP'
+case_dir="$TEST_TMP/roots-plugins-only"
+mkdir -p "$case_dir/home/Plugins"
+make_remote_repo "$case_dir" seed
+git clone -q "$case_dir/origin.git" "$case_dir/home/Plugins/plugrepo" 2>/dev/null
+run_default_roots "$case_dir"
+assert_contains 'ホームの Plugins だけでも今までどおり点検する' "$case_dir/output.txt" '「plugrepo」 — fetch=SKIP'
+assert_not_contains 'ホームの projects が無ければ「対象ルートがありません」を出さない' "$case_dir/output.txt" '対象ルートがありません'
+case_dir="$TEST_TMP/roots-neither"
+mkdir -p "$case_dir/home"
+run_default_roots "$case_dir"
+assert_contains 'どちらも無ければ 0 件の案内を出す' "$case_dir/output.txt" 'FAIL  対象リポが0件です（RH_ROOTS の設定を確認してください）'
+case_dir="$TEST_TMP/roots-config-wins"
+mkdir -p "$case_dir/home/projects" "$case_dir/home/Plugins"
+make_remote_repo "$case_dir" seed
+git clone -q "$case_dir/origin.git" "$case_dir/home/projects/projrepo" 2>/dev/null
+git clone -q "$case_dir/origin.git" "$case_dir/home/Plugins/plugrepo" 2>/dev/null
+printf 'RH_ROOTS=("$HOME/Plugins")\n' > "$case_dir/config.sh"
+chmod 600 "$case_dir/config.sh"
+run_default_roots "$case_dir"
+assert_contains '設定に RH_ROOTS があればそのとおりに点検する' "$case_dir/output.txt" '「plugrepo」 — fetch=SKIP'
+assert_not_contains '設定に RH_ROOTS があればホームの projects を足さない' "$case_dir/output.txt" '「projrepo」'
+assert_not_contains '設定例は RH_ROOTS を直書きしない（既定を上書きしない）' "$PROJECT_DIR/config/config.example.sh" '^RH_ROOTS='
+
+# §8 CI（GitHub Actions）: アクションはコミットの SHA で固定・秘密を使わない・権限は読み取りだけ
+workflow="$PROJECT_DIR/.github/workflows/tests.yml"
+if [ -f "$workflow" ]; then pass 'CI のワークフローがある'; else fail 'CI のワークフローがある'; fi
+uses_total="$(LC_ALL=C grep -cE '^[[:space:]]*(-[[:space:]]+)?uses:' "$workflow" || true)"
+uses_pinned="$(LC_ALL=C grep -cE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+@[0-9a-f]{40}[[:space:]]+#[[:space:]]*v[0-9][0-9.]*$' "$workflow" || true)"
+if [ "${uses_total:-0}" -ge 1 ] && [ "$uses_total" = "$uses_pinned" ]; then pass 'CI のアクションはすべてコミットの SHA で固定し、行末にタグを書く'; else fail 'CI のアクションはすべてコミットの SHA で固定し、行末にタグを書く'; fi
+assert_contains 'CI の権限は contents: read だけ' "$workflow" '^permissions:$'
+assert_contains 'CI は contents を読み取りだけにする' "$workflow" '^  contents: read$'
+assert_not_contains 'CI は write 権限を持たない' "$workflow" ':[[:space:]]*write'
+assert_not_contains 'CI は秘密を使わない' "$workflow" 'secrets\.'
+assert_contains 'CI は macOS で動かす' "$workflow" 'runs-on: macos-latest'
+assert_contains 'CI は push（main）と pull_request で動く' "$workflow" '^  pull_request:$'
+assert_contains 'CI は回帰テストを動かす' "$workflow" 'tests/run-tests\.sh'
+ci_denied=0
+while IFS=$'\t' read -r denied_action _denied_reason; do
+  case "$denied_action" in ''|\#*) continue;; esac
+  if LC_ALL=C grep -qiF "$denied_action" "$workflow"; then ci_denied=1; fi
+done < "$PROJECT_DIR/config/actions-denylist.tsv"
+if [ "$ci_denied" = 0 ]; then pass 'CI のアクションは侵害リストに当たらない'; else fail 'CI のアクションは侵害リストに当たらない'; fi
 
 python3 -I "$PROJECT_DIR/tests/data_guard_test.py" > "$TEST_TMP/data-guard-tests.log" 2>&1
 dg_test_rc=$?
