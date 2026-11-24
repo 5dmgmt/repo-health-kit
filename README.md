@@ -214,7 +214,7 @@ RH_AUTOFIX_CLI=0
 
 CLI の自動更新は初期状態で無効です（`RH_AUTOFIX_CLI=0` では、マイナー・パッチの遅れは参考に並べるだけ、メジャーの遅れは WARN で案内します）。`RH_AUTOFIX_CLI=1` にしたときだけ、npm で入れた CLI を、メジャーに加えてマイナー・パッチの遅れも、公開から3日以上たった版へ更新します。正式な latest 以下で、現在も配布され、非推奨になっていない版を選びます。更新に失敗したときは、「… の自動更新に失敗しました（実行するコマンド）」と WARN で知らせます。取得できなければ未検査とします。npm 以外（Homebrew・ネイティブ）で入れた CLI は自動更新せず、現在版・上げ先・入れた方法に応じた直し方を WARN で案内します。Claude Code の公開日は npm の情報で確認します。サポート中の Node.js LTS 系列から次の LTS への案内は参考に出します。
 
-Homebrew の formula と cask の自動更新には 3 日待ちがありません。
+Homebrew の formula と cask の自動更新には 3 日待ちがありません。Homebrew は新しい版を、人のレビュー・CI・チェックサムの照合を通してから配っています。そのうえで全部を待たせると openssl などの修正が遅れるほうが損だと、Homebrew の公式文書（[Homebrew Security and Supply Chain](https://docs.brew.sh/Homebrew-Security-and-Supply-Chain)）が説明しているためです。版を止めたい道具は `brew pin` で止めてください。
 
 install は、そのときの npm の場所を `RH_NPM_DIR`、手元の clone の場所を `RH_CLONE_DIR` として設定に記録します。無人実行では、存在する fnm の default（`~/.local/share/fnm/aliases/default/bin`、無ければ `~/Library/Application Support/fnm/aliases/default/bin`）、nvm の `~/.nvm/alias/default` が指す版の bin、`RH_NPM_DIR` を PATH に加えます。シェルの初期化ファイルは実行しません。npm が見つからず飛ばした点検は未検査に残します。設定変更後に時刻を launchd へ反映するには、もう一度 `./install.sh` を実行します。
 
