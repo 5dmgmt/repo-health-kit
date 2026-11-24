@@ -1666,6 +1666,15 @@ run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BRE
 if [ "$(LC_ALL=C grep -cE '^- WARN .*curl' "$case_dir/output.txt")" = "1" ]; then pass 'セキュリティ部品の更新待ちと最低版の WARN を 1件にまとめる'; else fail 'セキュリティ部品の更新待ちと最低版の WARN を 1件にまとめる'; sed -n '1,40p' "$case_dir/output.txt"; fi
 assert_contains 'まとめた WARN に更新待ちの版と最低版の理由を残す' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: curl 8\.22\.0 → 8\.23\.0（修正版 8\.23\.0 未満: CVE-2026-92392'
 
+# openssl@4 も一覧の openssl@* で拾う（0.8.2・2026-11-24 に両機で openssl@4 4.1.0 が入っていたのに一覧は @3・@1.1 だけだった）。
+case_dir="$TEST_TMP/brew-openssl4"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" FAKE_BREW_VERSIONS='openssl@4 4.1.0\n' \
+  FAKE_BREW_JSON='{"formulae":[{"name":"openssl@4","installed_versions":["4.1.0"],"current_version":"4.1.1"}]}'
+assert_contains 'openssl@4 の更新待ちもセキュリティ部品として WARN' "$case_dir/output.txt" 'WARN  Mac のセキュリティ部品に更新が出ています: openssl@4 4\.1\.0 → 4\.1\.1'
+
 case_dir="$TEST_TMP/brew-absent-for-minimums"
 fake_bin="$case_dir/fake-bin"
 make_fake_brew "$fake_bin"

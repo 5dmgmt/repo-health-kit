@@ -1,6 +1,5 @@
 ca-certificates
-openssl@3
-openssl@1.1
+openssl@*
 curl
 git
 openssh
