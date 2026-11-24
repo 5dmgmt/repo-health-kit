@@ -2048,6 +2048,8 @@ brew_snapshot() {
 brew_record_changes() {
   local before="$1" after="$2" requested="$3" suffix="${4-}" name old new detail
   local changes="$TMP_DIR/brew-version-changes.tsv"
+  # 上げたあとは「新しい版の出ている formula」の一覧を取り直します。
+  rm -f "$TMP_DIR/brew-outdated-formulae.list"
   python3 -I - "$before" "$after" > "$changes" 2>/dev/null <<'PY'
 import sys
 def read(path):
@@ -2082,6 +2084,34 @@ brew_prepare_pins() {
   fi
 }
 
+# 新しい版の出ている formula の名前の一覧を作ります。取れなければ 1。
+brew_prepare_outdated() {
+  local output="$TMP_DIR/brew-outdated-formulae.list" json="$TMP_DIR/brew-outdated-formulae.json"
+  [ -f "$output" ] && return 0
+  if run_timeout 300 brew outdated --formula --json=v2 > "$json" 2>/dev/null \
+    && python3 -I - "$json" > "$output.tmp" 2>/dev/null <<'PYOUTDATED'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+formulae = data.get("formulae")
+if not isinstance(formulae, list):
+    raise SystemExit(1)
+for formula in formulae:
+    if not isinstance(formula, dict) or not isinstance(formula.get("name"), str):
+        raise SystemExit(1)
+    print(formula["name"])
+    if isinstance(formula.get("full_name"), str) and formula["full_name"] != formula["name"]:
+        print(formula["full_name"])
+PYOUTDATED
+  then
+    mv "$output.tmp" "$output"
+    return 0
+  fi
+  rm -f "$output.tmp"
+  return 1
+}
+
 brew_formula_is_protected() {
   local name="$1"
   software_is_ignored "$name" && return 0
@@ -2095,7 +2125,7 @@ brew_formula_is_protected() {
 }
 
 brew_formula_safe_to_upgrade() {
-  local name="$1" dependency
+  local name="$1" dependency outdated_known
   local deps="$TMP_DIR/brew-deps.list" uses="$TMP_DIR/brew-uses.list"
   brew_prepare_pins || return 1
   if ! run_timeout 30 brew uses --installed --recursive "$name" > "$uses" 2>/dev/null \
@@ -2103,8 +2133,13 @@ brew_formula_safe_to_upgrade() {
     NOTES[${#NOTES[@]}]="Homebrew の ${name} の依存関係を取得できず自動更新は未検査"
     return 1
   fi
+  outdated_known=0
+  brew_prepare_outdated && outdated_known=1
   while IFS= read -r dependency; do
     [ -n "$dependency" ] || continue
+    # 新しい版の出ていない依存先は brew upgrade が触らないので、巻き込みは起きません。
+    # 一覧が取れないときは、今までどおり依存先を全部見ます。
+    if [ "$outdated_known" = "1" ] && ! grep -Fqx "$dependency" "$TMP_DIR/brew-outdated-formulae.list"; then continue; fi
     if brew_formula_is_protected "$dependency"; then
       add_warning "$name は $dependency を一緒に上げるため自動更新しませんでした"
       return 1

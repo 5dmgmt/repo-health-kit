@@ -2792,13 +2792,36 @@ for protection in security ignore pin; do
     ignore) protected=keepme; ignore=keepme ;;
     pin) protected=keepme; pinned=$'keepme\n' ;;
   esac
+  # 保護対象の依存先に新しい版が出ているときだけ、巻き込みになるので止めます。
   run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
     RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" \
     RH_SOFTWARE_IGNORE="$ignore" FAKE_BREW_PINNED="$pinned" FAKE_BREW_DEPS="$protected" \
-    FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+    FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"},{"name":"'"$protected"'","installed_versions":["1.0.0"],"current_version":"3.0.0"}],"casks":[]}'
   assert_not_contains "$protection: 保護対象を依存先に含む formula は上げない" "$case_dir/brew.log" '^upgrade --formula rclone$'
   assert_contains "$protection: 自動更新を見送った理由を WARN に出す" "$case_dir/output.txt" "WARN .*rclone は $protected を一緒に上げるため自動更新しませんでした"
 done
+
+# 依存先の ca-certificates が最新なのに「一緒に上げるため」と止め、node の作り直し版も入らなかった回帰（0.8.1）。
+case_dir="$TEST_TMP/k1-protected-current"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+: > "$case_dir/brew.log"
+printf '[]\n' > "$case_dir/catalog.json"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_AUTOFIX_SOFTWARE=1 \
+  RH_CASK_CATALOG="$case_dir/catalog.json" RH_MAS="$fake_bin/missing-mas" FAKE_BREW_DEPS=ca-certificates \
+  FAKE_BREW_JSON='{"formulae":[{"name":"rclone","installed_versions":["1.0.0"],"current_version":"2.0.0"}],"casks":[]}'
+assert_contains '保護対象の依存先が最新なら formula を上げる' "$case_dir/brew.log" '^upgrade --formula rclone$'
+assert_not_contains '最新の依存先を理由に止めた WARN を出さない' "$case_dir/output.txt" 'ca-certificates を一緒に上げるため'
+
+case_dir="$TEST_TMP/k1-revision-current-dependency"
+fake_bin="$case_dir/fake-bin"
+make_fake_brew "$fake_bin"
+: > "$case_dir/brew.log"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_AUTOFIX_SOFTWARE=1 FAKE_BREW_DEPS=ca-certificates \
+  FAKE_BREW_JSON='{"formulae":[{"name":"node","installed_versions":["26.13.1_2"],"current_version":"26.13.1_3"}],"casks":[]}'
+assert_contains '最新の ca-certificates に依存する node も作り直し版へ上げる' "$case_dir/brew.log" '^upgrade node$'
+assert_not_contains 'node を ca-certificates の巻き込みで止めない' "$case_dir/output.txt" 'node は ca-certificates を一緒に上げるため'
 
 case_dir="$TEST_TMP/k1-protected-dependent"
 fake_bin="$case_dir/fake-bin"
