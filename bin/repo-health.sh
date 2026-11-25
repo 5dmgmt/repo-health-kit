@@ -3414,6 +3414,7 @@ check_installed_software() {
   local mas_cmd
   local homebrew_checked=0 app_checked=0 mas_checked=0 npm_checked=0 mas_installed=0
   local attempted_upgrade=0 formula_rc=0 cask_rc=0 app_candidates=0
+  local cask_shown cask_key
   SOFTWARE_SKIP_TOOLS_EFFECTIVE="$RH_SOFTWARE_SKIP_TOOLS"
   if [ "$RH_SECURITY_ONLY" != "1" ] && [ "$RH_SKIP_CLI" != "1" ]; then
     SOFTWARE_SKIP_TOOLS_EFFECTIVE="$SOFTWARE_SKIP_TOOLS_EFFECTIVE claude codex node npm gh vercel supabase op"
@@ -3618,7 +3619,15 @@ PY
               else
                 remedy="brew upgrade --cask $name"
               fi
-              printf 'cask:%s\tHomebrew のアプリ\t%s\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" "$remedy" >> "$raw_updates"
+              # 自分で上がるアプリ（Chrome など）は Homebrew の記録が古いまま残る。表示と「何日止まっているか」はアプリの実物の版で見る
+              # （記録の版で数えると、アプリが上がり続けていても、最初に記録が古くなった日から数えてしまう）
+              cask_shown="$installed"
+              cask_key="cask:$name"
+              if [ "$present" = "1" ] && [ -n "$app_version" ] && [ "$app_version" != "-" ]; then
+                cask_shown="$app_version"
+                cask_key="cask:$name@$app_version"
+              fi
+              printf '%s\tHomebrew のアプリ\t%s\t%s\t%s\t%s\n' "$cask_key" "$name" "$cask_shown" "$latest" "$remedy" >> "$raw_updates"
             else
               remedy="brew upgrade --cask $name"
               printf 'cask:%s\tHomebrew\t%s\t%s\t%s\t%s\n' "$name" "$name" "$installed" "$latest" "$remedy" >> "$raw_updates"

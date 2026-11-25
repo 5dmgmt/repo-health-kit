@@ -2395,6 +2395,32 @@ run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_
   RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[],"casks":[]}'
 assert_not_contains '遅れが消えた項目は状態ファイルから消す' "$case_dir/state/software-outdated.tsv" 'formula:rclone'
 
+# 自分で上がるアプリ（Chrome 型）は Homebrew の記録が古いまま残る。表示と日数はアプリの実物の版で見る
+case_dir="$TEST_TMP/software-stale-self-updating-cask"
+fake_bin="$case_dir/fake-bin"
+apps="$case_dir/apps"
+catalog="$case_dir/catalog.json"
+make_fake_brew "$fake_bin"
+make_fake_software_npm "$fake_bin"
+make_fake_app "$apps" 'Google Chrome' com.google.Chrome 158.0.8127.88
+printf '[]\n' > "$catalog"
+mkdir -p "$case_dir/state"
+printf 'cask:google-chrome\t2026-11-11\n' > "$case_dir/state/software-outdated.tsv"
+: > "$case_dir/brew.log"
+brew_json='{"formulae":[],"casks":[{"name":"google-chrome","installed_versions":["156.0.8078.48"],"current_version":"158.0.8127.89"}]}'
+cask_info='{"formulae":[],"casks":[{"token":"google-chrome","auto_updates":true,"artifacts":[{"app":["Google Chrome.app"]}]}]}'
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-11-25 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON="$brew_json" FAKE_BREW_CASK_INFO_JSON="$cask_info"
+assert_not_contains 'アプリが上がっていれば記録の古さの日数で WARN にしない' "$case_dir/output.txt" 'WARN  google-chrome の更新が'
+assert_contains '自分で上がるアプリはアプリの実物の版を出す' "$case_dir/output.txt" 'ソフト更新: Homebrew のアプリ google-chrome 158\.0\.8127\.88 → 158\.0\.8127\.89'
+assert_contains '日数はアプリの実物の版ごとに数える' "$case_dir/state/software-outdated.tsv" '^cask:google-chrome@158\.0\.8127\.88	2026-11-25$'
+printf 'cask:google-chrome@158.0.8127.88\t2026-11-10\n' > "$case_dir/state/software-outdated.tsv"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-11-25 \
+  RH_APP_DIRS="$apps" RH_CASK_CATALOG="$catalog" RH_MAS="$fake_bin/missing-mas" \
+  FAKE_BREW_JSON="$brew_json" FAKE_BREW_CASK_INFO_JSON="$cask_info"
+assert_contains 'アプリの実物の版が 15 日止まっていれば WARN' "$case_dir/output.txt" 'WARN  google-chrome の更新が 15 日止まっています 158\.0\.8127\.88 → 158\.0\.8127\.89'
+
 case_dir="$TEST_TMP/software-autofix"
 fake_bin="$case_dir/fake-bin"
 apps="$case_dir/apps"
