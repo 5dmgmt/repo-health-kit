@@ -1509,6 +1509,24 @@ cli_is_npm() {
   case "$real" in */node_modules/*) npm_package_for_cli "$1" >/dev/null;; *) return 1;; esac
 }
 
+# Homebrew の node は npm を同梱していて、node を入れ直すたびに <prefix>/lib/node_modules/npm を同梱の版で上書きします。
+# ここにある npm を npm i -g で上げても次の node の更新で同梱の版に戻るので、npm は node の更新で上げるものとして扱います。
+# 引数は npm の置き場所（npm root -g の下の npm か、npm コマンドの実体）。
+npm_is_homebrew_bundled() {
+  local where="$1" prefix real keg
+  [ -n "$where" ] || return 1
+  command -v brew >/dev/null 2>&1 || return 1
+  prefix="$(run_timeout 30 brew --prefix 2>/dev/null || true)"
+  [ -n "$prefix" ] || return 1
+  prefix="$(real_path_of "$prefix")"
+  real="$(real_path_of "$where")"
+  case "$real" in "$prefix/lib/node_modules/npm"|"$prefix/lib/node_modules/npm/"*) ;; *) return 1 ;; esac
+  for keg in "$prefix"/opt/node "$prefix"/opt/node@*; do
+    [ -f "$keg/libexec/lib/node_modules/npm/package.json" ] && return 0
+  done
+  return 1
+}
+
 cli_remedy() {
   local tool="$1" path="$2" target="$3" real formula
   real="$(real_path_of "$path")"
@@ -1584,6 +1602,10 @@ check_cli_tools() {
         continue
       fi
       current_major="${current%%.*}"; latest_major="${target%%.*}"
+      if [ "$tool" = npm ] && npm_is_homebrew_bundled "$path"; then
+        CLI_UPDATES[${#CLI_UPDATES[@]}]="npm — $current → ${target}（Homebrew の node に付いてくる版です。npm i -g で上げても node の更新で戻るため、node の更新で上がるのを待ちます）"
+        continue
+      fi
       if [ "$tool" = node ] && [ -f "$SECURITY_MINIMUMS" ]; then
         lookup_minimum_row node "$current"
         if [ -n "$MIN_ROW_MINIMUM" ] && [ "$MIN_ROW_MINIMUM" != EOL ]; then
@@ -3810,6 +3832,10 @@ PY
         software_is_ignored "$package" && continue
         software_is_cli_managed npm "$package" && continue
         npm_checked=$((npm_checked + 1))
+        if [ "$package" = npm ] && npm_is_homebrew_bundled "$(run_timeout 30 npm root -g 2>/dev/null || true)/npm"; then
+          security_detail "npm $current は Homebrew の node に付いてくる版です。npm i -g で上げても node の更新で戻るため、node の更新で上がるのを待ちます（最新 ${latest}）"
+          continue
+        fi
         if ! npm_release_info "$package" "$current"; then
           NOTES[${#NOTES[@]}]="npm $package の公開日を取得できず未検査"
           continue

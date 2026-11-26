@@ -277,6 +277,7 @@ make_fake_software_npm() {
   {
     printf '%s\n' '#!/bin/bash'
     printf '%s\n' 'if [ "${1:-}" = "outdated" ] && [ "${2:-}" = "-g" ]; then if [ -n "${FAKE_NPM_OUTDATED_JSON-}" ]; then printf "%s\n" "$FAKE_NPM_OUTDATED_JSON"; else printf "%s\n" "{}"; fi; exit "${FAKE_NPM_OUTDATED_RC:-0}"; fi'
+    printf '%s\n' 'if [ "${1:-}" = "root" ] && [ "${2:-}" = "-g" ]; then printf "%s\n" "${FAKE_NPM_ROOT:-/fake/npm-global/lib/node_modules}"; exit 0; fi'
     printf '%s\n' 'if [ "${1:-}" = "view" ] && [ "${3:-}" = "time" ]; then'
     printf '%s\n' '  case "${2:-}" in oldpkg) printf "%s\n" "${FAKE_NPM_OLD_TIME_JSON:?}";; youngpkg) printf "%s\n" "${FAKE_NPM_YOUNG_TIME_JSON:?}";; *) if [ -n "${FAKE_NPM_TIME_JSON-}" ]; then printf "%s\n" "$FAKE_NPM_TIME_JSON"; else printf "%s\n" '\''{"1.0.0":"2020-01-01T00:00:00Z"}'\''; fi;; esac'
     printf '%s\n' '  exit 0'
@@ -2368,6 +2369,70 @@ assert_contains 'npm は公開3日以上の一つ前の版を上げ先にする'
 assert_contains 'npm の最新が3日未満なら待つ旨を添える' "$case_dir/output.txt" '最新 3\.0\.0 は .*公開・3 日待ち'
 assert_not_contains '3日未満の版しかない npm は更新に数えない' "$case_dir/output.txt" 'ソフト更新: npm youngpkg'
 assert_contains '3日未満の版しかない npm は detail に残す' "$case_dir/output.txt" 'youngpkg の最新 2\.0\.0 は公開から 3 日たっていないので待ちます'
+
+# Homebrew の node に付いてくる npm は、npm i -g で上げても node の更新で戻るので、更新待ちに数えない
+for bundled in 1 0; do
+  case_dir="$TEST_TMP/software-npm-homebrew-bundled-$bundled"
+  fake_bin="$case_dir/fake-bin"
+  hb="$case_dir/homebrew"
+  make_fake_brew "$fake_bin"
+  make_fake_software_npm "$fake_bin"
+  mkdir -p "$hb/lib/node_modules/npm" "$case_dir/state"
+  if [ "$bundled" = 1 ]; then
+    mkdir -p "$hb/opt/node/libexec/lib/node_modules/npm"
+    printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$hb/opt/node/libexec/lib/node_modules/npm/package.json"
+  fi
+  printf 'npm:npm\t2026-10-10\n' > "$case_dir/state/software-outdated.tsv"
+  : > "$case_dir/brew.log"
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-10-25 \
+    RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[],"casks":[]}' FAKE_BREW_PREFIX="$hb" \
+    FAKE_NPM_ROOT="$hb/lib/node_modules" FAKE_NPM_OUTDATED_JSON='{"npm":{"current":"11.20.0","latest":"12.2.3"}}' \
+    FAKE_NPM_TIME_JSON='{"11.20.0":"2020-01-01T00:00:00Z","12.2.3":"2020-02-01T00:00:00Z"}'
+  if [ "$bundled" = 1 ]; then
+    assert_not_contains 'Homebrew の node に付いてくる npm は日数の WARN にしない' "$case_dir/output.txt" 'npm の更新が .* 日止まっています'
+    assert_not_contains 'Homebrew の node に付いてくる npm はソフト更新に数えない' "$case_dir/output.txt" 'ソフト更新: npm npm'
+    assert_contains 'Homebrew の node に付いてくる npm は detail に理由を残す' "$case_dir/output.txt" 'npm 11\.20\.0 は Homebrew の node に付いてくる版です.*最新 12\.2\.3'
+    assert_not_contains 'Homebrew の node に付いてくる npm は状態ファイルから外す' "$case_dir/state/software-outdated.tsv" '^npm:npm'
+  else
+    assert_contains 'node が npm を同梱していなければ今までどおり日数の WARN にする' "$case_dir/output.txt" 'WARN  npm の更新が 15 日止まっています 11\.20\.0 → 12\.2\.3'
+  fi
+done
+
+# CLI の確認でも、Homebrew の node に付いてくる npm はメジャー版遅れの WARN・自動更新にしない
+for bundled in 1 0; do
+  case_dir="$TEST_TMP/cli-npm-homebrew-bundled-$bundled"
+  fake_bin="$case_dir/fake-bin"
+  hb="$case_dir/homebrew"
+  make_fake_brew "$fake_bin"
+  make_fake_cli_set "$fake_bin"
+  make_fake_claude "$fake_bin/claude"
+  mkdir -p "$hb/lib/node_modules/npm/bin"
+  if [ "$bundled" = 1 ]; then
+    mkdir -p "$hb/opt/node/libexec/lib/node_modules/npm"
+    printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$hb/opt/node/libexec/lib/node_modules/npm/package.json"
+  fi
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf '%s\n' 'if [ "${1:-}" = "view" ]; then printf "%s\n" '\''{"time":{"11.20.0":"2020-01-01T00:00:00.000Z","12.2.3":"2020-02-01T00:00:00.000Z"},"versions":["11.20.0","12.2.3"],"dist-tags":{"latest":"12.2.3"}}'\''; exit 0; fi'
+    printf '%s\n' 'if [ "${1:-}" = "install" ]; then printf "%s\n" "$*" >> "${FAKE_NPM_INSTALL_LOG:?}"; exit 0; fi'
+    printf '%s\n' 'printf "%s\n" "11.20.0"'
+  } > "$hb/lib/node_modules/npm/bin/npm-cli.js"
+  chmod +x "$hb/lib/node_modules/npm/bin/npm-cli.js"
+  rm -f "$fake_bin/npm" "$fake_bin/npm-fixture"
+  ln -s "$hb/lib/node_modules/npm/bin/npm-cli.js" "$fake_bin/npm"
+  : > "$case_dir/brew.log"
+  : > "$case_dir/install.log"
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 \
+    FAKE_BREW_PREFIX="$hb" FAKE_NPM_INSTALL_LOG="$case_dir/install.log" \
+    RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)' FAKE_CLAUDE_LATEST=2.1.250
+  if [ "$bundled" = 1 ]; then
+    assert_contains 'CLI: Homebrew の node に付いてくる npm は更新ありの一覧に理由つきで出す' "$case_dir/output.txt" 'npm — 11\.20\.0 → 12\.2\.3（Homebrew の node に付いてくる版です'
+    assert_not_contains 'CLI: Homebrew の node に付いてくる npm はメジャー版遅れの WARN にしない' "$case_dir/output.txt" 'npm — メジャー版が遅れています'
+    assert_not_contains 'CLI: Homebrew の node に付いてくる npm は自動更新しない' "$case_dir/install.log" 'npm@'
+  else
+    assert_contains 'CLI: node が npm を同梱していなければ今までどおり自動更新する' "$case_dir/install.log" 'install -g npm@12\.2\.3'
+  fi
+done
 
 case_dir="$TEST_TMP/software-stale-15"
 fake_bin="$case_dir/fake-bin"
