@@ -2430,9 +2430,134 @@ for bundled in 1 0; do
     assert_not_contains 'CLI: Homebrew の node に付いてくる npm はメジャー版遅れの WARN にしない' "$case_dir/output.txt" 'npm — メジャー版が遅れています'
     assert_not_contains 'CLI: Homebrew の node に付いてくる npm は自動更新しない' "$case_dir/install.log" 'npm@'
   else
-    assert_contains 'CLI: node が npm を同梱していなければ今までどおり自動更新する' "$case_dir/install.log" 'install -g npm@12\.2\.3'
+    assert_contains 'CLI: node が npm を同梱していなければメジャー版遅れを WARN にする' "$case_dir/output.txt" 'WARN  npm — メジャー版が遅れています 11\.20\.0 → 12\.2\.3（npm install -g npm@12\.2\.3）'
+    assert_contains 'CLI: 同梱でない npm のメジャー版遅れは自動で上げない旨を WARN に添える' "$case_dir/output.txt" 'npm のメジャー版は install の挙動が変わるため自動では上げません'
+    assert_not_contains 'CLI: 同梱でない npm のメジャー版遅れは RH_AUTOFIX_CLI=1 でも自動更新しない' "$case_dir/install.log" 'install -g npm@'
+    assert_not_contains 'CLI: 同梱でない npm のメジャー版遅れを「自動更新」と書かない' "$case_dir/output.txt" 'npm — メジャー版遅れ .* を自動更新'
   fi
 done
+
+# CLI の確認で、同梱の npm の置き場の形を見分ける。node@NN だけを link している機（実体が Cellar/node@NN/<版>/lib/node_modules/npm の下）も同梱とする
+# 偽の npm は、npm install のあとに入れた版を返す（FAKE_NPM_INSTALL_NOOP=1 のときは入れたことにしない）
+write_fake_npm_cli() {
+  local path="$1" version="$2" version_file="$3"
+  mkdir -p "$(dirname -- "$path")"
+  cat > "$path.tmp" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = "view" ]; then
+  printf '{"time":{"11.20.0":"2020-01-01T00:00:00.000Z","11.21.3":"2020-01-15T00:00:00.000Z","12.2.3":"2020-02-01T00:00:00.000Z"},"versions":["11.20.0","11.21.3","12.2.3"],"dist-tags":{"latest":"%s"}}\n' "${FAKE_NPM_LATEST:-12.2.3}"
+  exit 0
+fi
+if [ "${1:-}" = "install" ]; then
+  printf '%s\n' "$*" >> "${FAKE_NPM_INSTALL_LOG:?}"
+  [ "${FAKE_NPM_INSTALL_NOOP:-0}" = 1 ] || printf '%s\n' "${3##*@}" > '__VERSION_FILE__'
+  exit 0
+fi
+if [ -f '__VERSION_FILE__' ]; then cat '__VERSION_FILE__'; else printf '%s\n' '__DEFAULT_VERSION__'; fi
+SH
+  sed -e "s|__VERSION_FILE__|$version_file|g" -e "s|__DEFAULT_VERSION__|$version|g" "$path.tmp" > "$path"
+  rm -f "$path.tmp"
+  chmod +x "$path"
+}
+
+# Homebrew の木（<prefix>）に、同梱の npm の置き場の形を作る
+make_homebrew_npm_tree() {
+  local hb="$1" layout="$2" version_file="$3" keg
+  mkdir -p "$hb/lib/node_modules" "$hb/opt"
+  case "$layout" in
+    node-libexec)
+      # node の同梱: Cellar/node/<版>/libexec/lib/node_modules/npm を link している（opt/node は無い）
+      keg="$hb/Cellar/node/26.13.1/libexec/lib/node_modules/npm"
+      write_fake_npm_cli "$keg/bin/npm-cli.js" 11.20.0 "$version_file"
+      printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$keg/package.json"
+      ln -s ../../Cellar/node/26.13.1/libexec/lib/node_modules/npm "$hb/lib/node_modules/npm";;
+    node-keg-dir)
+      # node@NN の同梱: Cellar/node@NN/<版>/lib/node_modules/npm（libexec ではない）をディレクトリごと link している
+      keg="$hb/Cellar/node@24/24.22.1/lib/node_modules/npm"
+      write_fake_npm_cli "$keg/bin/npm-cli.js" 11.20.0 "$version_file"
+      printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$keg/package.json"
+      ln -s ../Cellar/node@24/24.22.1 "$hb/opt/node@24"
+      ln -s ../../Cellar/node@24/24.22.1/lib/node_modules/npm "$hb/lib/node_modules/npm";;
+    node-keg-files)
+      # 同じ置き場を、ファイル単位で link している。実行ファイルは <prefix>/lib/node_modules/npm の中の実体で、package.json だけが Cellar を指す
+      keg="$hb/Cellar/node@24/24.22.1/lib/node_modules/npm"
+      mkdir -p "$keg" "$hb/lib/node_modules/npm"
+      printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$keg/package.json"
+      ln -s ../Cellar/node@24/24.22.1 "$hb/opt/node@24"
+      ln -s ../../../Cellar/node@24/24.22.1/lib/node_modules/npm/package.json "$hb/lib/node_modules/npm/package.json"
+      write_fake_npm_cli "$hb/lib/node_modules/npm/bin/npm-cli.js" 11.20.0 "$version_file";;
+    node-keg-user-npm)
+      # keg-only の node@NN があるだけ。<prefix>/lib/node_modules/npm は利用者が npm i -g npm で入れた実体
+      keg="$hb/Cellar/node@24/24.22.1/lib/node_modules/npm"
+      mkdir -p "$keg" "$hb/lib/node_modules/npm"
+      printf '%s\n' '{"name":"npm","version":"11.19.1"}' > "$keg/package.json"
+      ln -s ../Cellar/node@24/24.22.1 "$hb/opt/node@24"
+      printf '%s\n' '{"name":"npm","version":"11.20.0"}' > "$hb/lib/node_modules/npm/package.json"
+      write_fake_npm_cli "$hb/lib/node_modules/npm/bin/npm-cli.js" 11.20.0 "$version_file";;
+  esac
+}
+
+make_npm_layout_case() {
+  local case_dir="$1" layout="$2" fake_bin="$1/fake-bin"
+  make_fake_brew "$fake_bin"
+  make_fake_cli_set "$fake_bin"
+  make_fake_claude "$fake_bin/claude"
+  rm -f "$fake_bin/npm" "$fake_bin/npm-fixture"
+  make_homebrew_npm_tree "$case_dir/homebrew" "$layout" "$case_dir/npm-version"
+  ln -s "$case_dir/homebrew/lib/node_modules/npm/bin/npm-cli.js" "$fake_bin/npm"
+  : > "$case_dir/brew.log"
+  : > "$case_dir/install.log"
+}
+
+for layout in node-libexec node-keg-dir node-keg-files node-keg-user-npm; do
+  case_dir="$TEST_TMP/cli-npm-layout-$layout"
+  make_npm_layout_case "$case_dir" "$layout"
+  fake_bin="$case_dir/fake-bin"
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 \
+    FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_NPM_INSTALL_LOG="$case_dir/install.log" \
+    RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)' FAKE_CLAUDE_LATEST=2.1.250
+  if [ "$layout" = node-keg-user-npm ]; then
+    assert_contains "CLI 置き場 $layout: keg-only の node@NN があっても、利用者が入れた npm は同梱としない" "$case_dir/output.txt" 'WARN  npm — メジャー版が遅れています 11\.20\.0 → 12\.2\.3'
+    assert_not_contains "CLI 置き場 $layout: 同梱としないので「付いてくる版」とは書かない" "$case_dir/output.txt" 'Homebrew の node に付いてくる版です'
+  else
+    assert_contains "CLI 置き場 $layout: Homebrew の node の同梱として更新ありの一覧に理由つきで出す" "$case_dir/output.txt" 'npm — 11\.20\.0 → 12\.2\.3（Homebrew の node に付いてくる版です'
+    assert_not_contains "CLI 置き場 $layout: 同梱の npm はメジャー版遅れの WARN にしない" "$case_dir/output.txt" 'npm — メジャー版が遅れています'
+  fi
+  assert_not_contains "CLI 置き場 $layout: npm は RH_AUTOFIX_CLI=1 でも install しない" "$case_dir/install.log" 'install -g npm@'
+done
+
+# ソフト更新の確認では、npm の置き場（npm root -g の下の npm）がディレクトリで渡る。同じ置き場の形を見分ける
+for layout in node-keg-dir node-keg-files node-keg-user-npm; do
+  case_dir="$TEST_TMP/software-npm-layout-$layout"
+  fake_bin="$case_dir/fake-bin"
+  hb="$case_dir/homebrew"
+  make_fake_brew "$fake_bin"
+  make_fake_software_npm "$fake_bin"
+  make_homebrew_npm_tree "$hb" "$layout" "$case_dir/npm-version"
+  mkdir -p "$case_dir/state"
+  printf 'npm:npm\t2026-10-10\n' > "$case_dir/state/software-outdated.tsv"
+  : > "$case_dir/brew.log"
+  run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_SOFTWARE=0 RH_TODAY=2026-10-25 \
+    RH_MAS="$fake_bin/missing-mas" FAKE_BREW_JSON='{"formulae":[],"casks":[]}' FAKE_BREW_PREFIX="$hb" \
+    FAKE_NPM_ROOT="$hb/lib/node_modules" FAKE_NPM_OUTDATED_JSON='{"npm":{"current":"11.20.0","latest":"12.2.3"}}' \
+    FAKE_NPM_TIME_JSON='{"11.20.0":"2020-01-01T00:00:00Z","12.2.3":"2020-02-01T00:00:00Z"}'
+  if [ "$layout" = node-keg-user-npm ]; then
+    assert_contains "ソフト更新 置き場 $layout: 利用者が入れた npm は今までどおり日数の WARN にする" "$case_dir/output.txt" 'WARN  npm の更新が 15 日止まっています 11\.20\.0 → 12\.2\.3'
+  else
+    assert_not_contains "ソフト更新 置き場 $layout: 同梱の npm は日数の WARN にしない" "$case_dir/output.txt" 'npm の更新が .* 日止まっています'
+    assert_contains "ソフト更新 置き場 $layout: 同梱の npm は detail に理由を残す" "$case_dir/output.txt" 'npm 11\.20\.0 は Homebrew の node に付いてくる版です.*最新 12\.2\.3'
+  fi
+done
+
+# 同梱でない npm のマイナー遅れは、RH_AUTOFIX_CLI=1 のとき今までどおり上げる（claude 向けのフラグは付けない）。上げたあとに動く版が上げ先と同じなら成功
+case_dir="$TEST_TMP/cli-npm-minor-autofix"
+make_npm_layout_case "$case_dir" node-keg-user-npm
+fake_bin="$case_dir/fake-bin"
+run_security "$case_dir" "$fake_bin" FAKE_BREW_LOG="$case_dir/brew.log" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 \
+  FAKE_BREW_PREFIX="$case_dir/homebrew" FAKE_NPM_INSTALL_LOG="$case_dir/install.log" FAKE_NPM_LATEST=11.21.3 \
+  RH_CLAUDE_CANDIDATES="$fake_bin/claude" FAKE_CLAUDE_OUTPUT='2.1.250 (Claude Code)' FAKE_CLAUDE_LATEST=2.1.250
+assert_contains '同梱でない npm のマイナー遅れは RH_AUTOFIX_CLI=1 で自動更新する' "$case_dir/output.txt" 'npm — 11\.20\.0 → 11\.21\.3 を自動更新'
+assert_contains 'npm 本体の更新には claude 向けのフラグを付けない' "$case_dir/install.log" '^install -g npm@11\.21\.3$'
 
 case_dir="$TEST_TMP/software-stale-15"
 fake_bin="$case_dir/fake-bin"
@@ -3755,17 +3880,31 @@ assert_not_contains '名前の `|` を表示に残さない' "$case_dir/output.t
 
 # §4 RH_AUTOFIX_CLI=1 のときだけ、npm で入れた CLI のマイナー・パッチ遅れも自動更新する
 make_npm_installed_claude() {
-  local case_dir="$1" fake_bin="$2"
+  local case_dir="$1" fake_bin="$2" claude_dir="$1/lib/node_modules/@anthropic-ai/claude-code/bin"
   make_fake_brew "$fake_bin"
   make_fake_cli_set "$fake_bin"
-  make_fake_claude "$case_dir/lib/node_modules/@anthropic-ai/claude-code/bin/claude"
-  ln -s "$case_dir/lib/node_modules/@anthropic-ai/claude-code/bin/claude" "$fake_bin/claude"
+  # 偽の claude は、npm install のあとは入れた版を返す（更新後の確かめ用）。FAKE_NPM_INSTALL_NOOP=1 のときは入れたことにしない
+  mkdir -p "$claude_dir"
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf 'installed=%q\n' "$case_dir/installed-version"
+    printf '%s\n' 'if [ -f "$installed" ]; then cat "$installed"; else printf "%s\n" "${FAKE_CLAUDE_OUTPUT-}"; fi'
+  } > "$claude_dir/claude"
+  chmod +x "$claude_dir/claude"
+  ln -s "$claude_dir/claude" "$fake_bin/claude"
   mv "$fake_bin/npm-fixture" "$fake_bin/npm-fixture-orig"
-  cat > "$fake_bin/npm-fixture" <<'SH'
-#!/bin/bash
-if [ "${1:-}" = install ]; then printf '%s\n' "$*" >> "${FAKE_NPM_INSTALL_LOG:?}"; exit "${FAKE_NPM_INSTALL_RC:-0}"; fi
+  {
+    printf '%s\n' '#!/bin/bash'
+    printf 'installed=%q\n' "$case_dir/installed-version"
+    cat <<'SH'
+if [ "${1:-}" = install ]; then
+  printf '%s\n' "$*" >> "${FAKE_NPM_INSTALL_LOG:?}"
+  if [ "${FAKE_NPM_INSTALL_RC:-0}" = 0 ] && [ "${FAKE_NPM_INSTALL_NOOP:-0}" != 1 ]; then printf '%s\n' "${3##*@}" > "$installed"; fi
+  exit "${FAKE_NPM_INSTALL_RC:-0}"
+fi
 exec "$0-orig" "$@"
 SH
+  } > "$fake_bin/npm-fixture"
   chmod +x "$fake_bin/npm-fixture"
 }
 case_dir="$TEST_TMP/cli-minor-autofix"
@@ -3775,8 +3914,9 @@ make_npm_installed_claude "$case_dir" "$fake_bin"
 run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 FAKE_BREW_LOG="$case_dir/brew.log" \
   FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log"
 assert_contains 'RH_AUTOFIX_CLI=1 は npm 導入の CLI のマイナー遅れを自動更新する' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300 を自動更新'
-assert_contains '自動更新は公開から 3 日以上の上げ先を npm install -g する' "$case_dir/install.log" '^install -g @anthropic-ai/claude-code@2\.1\.300$'
+assert_contains '自動更新は公開から 3 日以上の上げ先を npm install -g する（claude には postinstall の許可を付ける）' "$case_dir/install.log" '^install -g @anthropic-ai/claude-code@2\.1\.300 --allow-scripts=@anthropic-ai/claude-code$'
 assert_not_contains '自動更新できた CLI は更新あり一覧・WARN に出さない' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250|CLI 更新あり: [1-9]|^- claude — 2\.1\.250 → 2\.1\.300$'
+rm -f "$case_dir/installed-version"
 : > "$case_dir/install.log"
 run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=0 FAKE_BREW_LOG="$case_dir/brew.log" \
   FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log"
@@ -3785,8 +3925,15 @@ assert_not_contains 'RH_AUTOFIX_CLI=0 は自動更新しない' "$case_dir/outpu
 assert_count 'RH_AUTOFIX_CLI=0 は npm install を呼ばない' "$case_dir/install.log" 'install' 0
 run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 FAKE_BREW_LOG="$case_dir/brew.log" \
   FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log" FAKE_NPM_INSTALL_RC=1
-assert_contains '自動更新に失敗したら WARN にコマンドを出す' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250 → 2\.1\.300 の自動更新に失敗しました（npm install -g @anthropic-ai/claude-code@2\.1\.300）'
+assert_contains '自動更新に失敗したら WARN にコマンドを出す（claude には postinstall の許可を付ける）' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250 → 2\.1\.300 の自動更新に失敗しました（npm install -g @anthropic-ai/claude-code@2\.1\.300 --allow-scripts=@anthropic-ai/claude-code）'
 assert_not_contains '自動更新に失敗した CLI を「自動更新」と書かない' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300 を自動更新'
+# npm の終了コードが 0 でも、入れたあとに動く版が上げ先と同じでなければ失敗として扱う（別の置き場に入った・スクリプトが止められた場合）
+: > "$case_dir/install.log"
+run_security "$case_dir" "$fake_bin" RH_SKIP_CLI=0 RH_AUTOFIX_CLI=1 FAKE_BREW_LOG="$case_dir/brew.log" \
+  FAKE_CLAUDE_OUTPUT=2.1.250 FAKE_CLAUDE_LATEST=2.1.300 FAKE_NPM_INSTALL_LOG="$case_dir/install.log" FAKE_NPM_INSTALL_NOOP=1
+assert_count '版が変わらなかった自動更新でも npm install は 1 回だけ呼ぶ' "$case_dir/install.log" '^install -g ' 1
+assert_contains '入れたあとに版が上げ先と同じにならなければ、終了コードが 0 でも WARN にする' "$case_dir/output.txt" 'WARN  claude — 2\.1\.250 → 2\.1\.300 の自動更新に失敗しました（npm install -g @anthropic-ai/claude-code@2\.1\.300 --allow-scripts=@anthropic-ai/claude-code）'
+assert_not_contains '入れたあとに版が上げ先と同じにならなければ「自動更新」と書かない' "$case_dir/output.txt" 'claude — 2\.1\.250 → 2\.1\.300 を自動更新'
 
 # §5 止めた GitHub の点検は「止めています」、gh 不在・未ログインは「未検査」のまま（3 日目の WARN は後者だけ）
 case_dir="$TEST_TMP/github-stopped-vs-missing"

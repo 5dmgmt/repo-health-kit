@@ -1511,27 +1511,48 @@ cli_is_npm() {
 
 # Homebrew の node は npm を同梱していて、node を入れ直すたびに <prefix>/lib/node_modules/npm を同梱の版で上書きします。
 # ここにある npm を npm i -g で上げても次の node の更新で同梱の版に戻るので、npm は node の更新で上げるものとして扱います。
-# 引数は npm の置き場所（npm root -g の下の npm か、npm コマンドの実体）。
+# 同梱の npm の置き場は 2 通りです。
+#   node        … <prefix>/Cellar/node/<版>/libexec/lib/node_modules/npm（<prefix>/opt/node/libexec/lib/node_modules/npm）
+#   node@NN     … <prefix>/Cellar/node@NN/<版>/lib/node_modules/npm（libexec ではありません）
+# 引数は npm の置き場所（npm root -g の下の npm か、npm コマンドの実体）。次のどれかなら同梱とします。
+#   1. 実体が <prefix>/lib/node_modules/npm の下にあり、opt/node の libexec に同梱の npm がある（opt/node@* の libexec も見ますが、node@NN の同梱は libexec にありません）。
+#   2. 実体が上の Cellar の置き場（node または node@NN）の下にある（node@NN だけを link した機）。
+#   3. 実体が <prefix>/lib/node_modules/npm の下にあり、その package.json の実体が 2 の置き場の下にある（ファイル単位の link）。
+# keg-only の node@NN の opt/node@NN/lib/node_modules/npm があるだけでは同梱としません。
+# その場合の <prefix>/lib/node_modules/npm は、利用者が npm i -g npm で入れたもので、node の更新では上書きされないためです。
 npm_is_homebrew_bundled() {
-  local where="$1" prefix real keg
+  local where="$1" prefix real keg package_real
   [ -n "$where" ] || return 1
   command -v brew >/dev/null 2>&1 || return 1
   prefix="$(run_timeout 30 brew --prefix 2>/dev/null || true)"
   [ -n "$prefix" ] || return 1
   prefix="$(real_path_of "$prefix")"
   real="$(real_path_of "$where")"
+  if npm_path_in_homebrew_keg "$prefix" "$real"; then return 0; fi
   case "$real" in "$prefix/lib/node_modules/npm"|"$prefix/lib/node_modules/npm/"*) ;; *) return 1 ;; esac
   for keg in "$prefix"/opt/node "$prefix"/opt/node@*; do
     [ -f "$keg/libexec/lib/node_modules/npm/package.json" ] && return 0
   done
+  package_real="$(real_path_of "$prefix/lib/node_modules/npm/package.json")"
+  npm_path_in_homebrew_keg "$prefix" "$package_real"
+}
+
+# 実体のパスが、Homebrew の node または node@NN の Cellar の中の npm の置き場の下なら成功します。
+npm_path_in_homebrew_keg() {
+  local prefix="$1" real="$2"
+  case "$real" in
+    "$prefix"/Cellar/node/*/libexec/lib/node_modules/npm|"$prefix"/Cellar/node/*/libexec/lib/node_modules/npm/*) return 0 ;;
+    "$prefix"/Cellar/node@*/*/lib/node_modules/npm|"$prefix"/Cellar/node@*/*/lib/node_modules/npm/*) return 0 ;;
+  esac
   return 1
 }
 
 cli_remedy() {
-  local tool="$1" path="$2" target="$3" real formula
+  local tool="$1" path="$2" target="$3" real formula flag
   real="$(real_path_of "$path")"
   if cli_is_npm "$tool" "$path"; then
-    printf 'npm install -g %s@%s' "$(npm_package_for_cli "$tool")" "$target"
+    flag="$(npm_install_flag "$tool")"
+    printf 'npm install -g %s@%s%s' "$(npm_package_for_cli "$tool")" "$target" "${flag:+ $flag}"
     return
   fi
   case "$tool:$path:$real" in
@@ -1544,9 +1565,29 @@ cli_remedy() {
   esac
 }
 
+# Claude Code の npm パッケージは、postinstall で本体の実行ファイルを置きます。
+# npm 12 以降は許可のない install スクリプトを実行せず、本体が置かれないまま起動しなくなるので、claude のときだけ許可のフラグを付けます。
+# このフラグを知らない古い npm でも、注意が出るだけで install は進みます。付けないツールは何も出しません。
+npm_install_flag() {
+  case "$1" in
+    claude) printf '%s' "--allow-scripts=$(npm_package_for_cli claude)" ;;
+  esac
+}
+
+# npm で入れ直したあと、実際に動く版が上げ先と同じになったときだけ成功とします。
+# npm の終了コードだけでは、入れた先と動いている先が違う場合（別の置き場に入った・スクリプトが止められた）を見分けられません。
 update_cli() {
-  cli_is_npm "$1" "$2" && [ -n "$3" ] || return 1
-  run_timeout 600 npm install -g "$(npm_package_for_cli "$1")@$3" >/dev/null 2>&1
+  local tool="$1" path="$2" target="$3" package flag now
+  cli_is_npm "$tool" "$path" && [ -n "$target" ] || return 1
+  package="$(npm_package_for_cli "$tool")"
+  flag="$(npm_install_flag "$tool")"
+  if [ -n "$flag" ]; then
+    run_timeout 600 npm install -g "${package}@${target}" "$flag" >/dev/null 2>&1 || return 1
+  else
+    run_timeout 600 npm install -g "${package}@${target}" >/dev/null 2>&1 || return 1
+  fi
+  now="$(current_version "$path" || true)"
+  [ "$now" = "$target" ]
 }
 
 check_cli_tools() {
@@ -1620,7 +1661,10 @@ check_cli_tools() {
         continue
       fi
       if [ "$latest_major" -gt "$current_major" ]; then
-        if [ "$RH_AUTOFIX_CLI" = "1" ] && update_cli "$tool" "$path" "$target"; then
+        if [ "$tool" = npm ]; then
+          # npm 本体のメジャー版は、依存の install スクリプトの扱いなど install の挙動が変わるため、RH_AUTOFIX_CLI=1 でも自動では上げません。
+          add_warning "npm — メジャー版が遅れています $current → ${target}（${remedy}）${wait_note}。npm のメジャー版は install の挙動が変わるため自動では上げません。上げる前に動作を確かめてください"
+        elif [ "$RH_AUTOFIX_CLI" = "1" ] && update_cli "$tool" "$path" "$target"; then
           AUTOFIXED[${#AUTOFIXED[@]}]="$tool — メジャー版遅れ $current → $target を自動更新"
         else
           add_warning "$tool — メジャー版が遅れています $current → ${target}（${remedy}）${wait_note}"

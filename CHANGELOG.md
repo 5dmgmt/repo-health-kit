@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.5 - 2026-11-27
+
+- Homebrew の node に付いてくる npm の判定を、`node@NN`（たとえば `node@24`）の置き場にも合わせました。`node@NN` の同梱の npm は `libexec` ではなく `lib/node_modules/npm` にあり、`node@NN` だけを link している機では、npm の実体が `Cellar/node@NN/<版>/lib/node_modules/npm` の下になります。これまでは「同梱ではない」と判定して、日数の WARN や自動更新の対象にしていました。実体が `Cellar/node/<版>/libexec/lib/node_modules/npm` か `Cellar/node@NN/<版>/lib/node_modules/npm` の下にあるとき（ファイル単位の link で、`package.json` の実体がその下にあるときを含みます）も同梱として扱います。keg-only の `node@NN` があるだけで、`<prefix>/lib/node_modules/npm` を利用者が `npm i -g npm` で入れた実体にしている場合は、これまでどおり同梱としません。
+- npm で入れた CLI の自動更新（`RH_AUTOFIX_CLI=1`）で、Claude Code には `--allow-scripts=@anthropic-ai/claude-code` を付けます。Claude Code の npm パッケージは postinstall で本体の実行ファイルを置くため、npm 12 以降は許可がないと本体が置かれず起動しなくなります。WARN に出す更新のコマンドにも同じフラグを付けました。ほかの CLI には付けません。
+- 自動更新のあと、実際に動く版が上げ先と同じになったかを確かめるようにしました。同じでなければ「自動更新に失敗しました」の WARN にし、「自動更新」とは書きません。これまでは npm の終了コードだけを見ていたため、別の置き場に入ったときや、スクリプトが止められて本体が置かれなかったときも、成功と書いていました。
+- npm 本体のメジャー版の遅れは、同梱でない npm でも、`RH_AUTOFIX_CLI=1` で自動更新しないようにしました。WARN で案内します。npm 12 は、許可のない依存の install スクリプトを実行しないなど、install の挙動が変わるためです。マイナー・パッチの遅れは、これまでどおり `RH_AUTOFIX_CLI=1` のとき自動更新します。
+
 ## 0.8.4 - 2026-11-26
 
 - Homebrew の node に付いてくる npm（`$(brew --prefix)/lib/node_modules/npm`）を、「npm の更新が N 日止まっています」の対象から外しました。Homebrew の node は、入れ直すたびにこの npm を同梱の版で上書きするため、`npm i -g npm@…` で上げても次の node の更新で戻り、その日から日数を数え直して、また WARN が出ていました。この npm は node の更新で上がるものとして、詳細に理由と最新の版だけを残します。
